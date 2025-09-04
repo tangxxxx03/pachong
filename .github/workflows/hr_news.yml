@@ -2,7 +2,7 @@ name: run-hr-news
 
 on:
   schedule:
-    # 每周一到周五，北京时间 8:30 自动运行（UTC 0:30）
+    # 工作日 北京时间 8:30（UTC 0:30）
     - cron: "30 0 * * 1-5"
   workflow_dispatch: {}
 
@@ -26,13 +26,14 @@ jobs:
 
       - name: Run HR News script
         env:
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}      # 如未开启加签，可不设置该 secret
-          DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}    # 如未开启关键字，可不设置
+          # ✅ 使用 HR 专属机器人
+          DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
+          DINGTALK_SECRET_HR: ${{ secrets.DINGTALK_SECRET_HR }}        # 若 HR 机器人开启加签才需要
+          DINGTALK_KEYWORD_HR: ${{ secrets.DINGTALK_KEYWORD_HR }}      # 若 HR 机器人开启关键字才需要
         run: |
           python hr_news.py
 
-      # 可选：上传结果文件，便于在 Actions 页面下载
+      # 可选：把生成的文件作为构件上传，便于下载
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
