@@ -3,7 +3,7 @@
 HR资讯自动抓取（工作日 8:30 推送钉钉）
 依赖：requests, beautifulsoup4, lxml
 Secrets:
-- DINGTALK_WEBHOOK（必填）
+- DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
 - DINGTALK_SECRET（可选：若开启加签）
 - DINGTALK_KEYWORD（可选：若开启关键字）
 """
