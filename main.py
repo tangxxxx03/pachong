@@ -12,6 +12,75 @@ import requests
 from bs4 import BeautifulSoup
 
 # ==================== 基本配置 ====================
+DINGTALK_WEBHOOK = os.getenv(
+    "DINGTALK_WEBHOOK",
+    "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
+).strip()
+
+KEYWORDS = ["外包","派遣","劳务外包","服务外包","人力外包","劳务派遣","人力派遣"]
+
+CRAWL_BEIJING = True
+CRAWL_ZSXTZB  = True
+
+MAX_PAGES_BJ = 10
+MAX_PAGES_ZS = 6
+REQUEST_DELAY = (1.0, 2.0)
+BJ_LOOSE_DAYS = 2
+
+USE_SITE_TIME_FILTER = True
+BJ_TIME_FILTER_TEXT  = "一周内"
+
+REGION_ALLOWED = {"北京","天津","河北"}
+
+# ==================== 钉钉 ====================
+def send_to_dingtalk_markdown(title: str, md_text: str) -> bool:
+    if not DINGTALK_WEBHOOK.startswith("http"):
+        print("❌ Webhook 无效"); return False
+    try:
+        r = requests.post(DINGTALK_WEBHOOK, json={"msgtype":"markdown","markdown":{"title":title,"text":md_text}}, timeout=20)
+        ok = (r.status_code==200 and r.json().get("errcode")==0)
+        print("钉钉发送成功" if ok else f"钉钉失败：{r.status_code} {r.text[:180]}")
+        return ok
+    except Exception as e:
+        print("❌ 钉钉异常：", e); return False
+
+def split_and_send(title_prefix: str, full_text: str, chunk_size=4500):
+    n = max(1, math.ceil(len(full_text)/chunk_size))
+    for i in range(n):
+        part = full_text[i*chunk_size:(i+1)*chunk_size]
+        title = f"{title_prefix}（{i+1}/{n}）" if n>1 else title_prefix
+        send_to_dingtalk_markdown(title, part)
+
+# ==================== Selenium Driver ====================
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+
+def build_driver():
+    opts = Options()
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-dev-shm-usage")
+    if os.getenv("HEADLESS", "1") == "1":
+        opts.add_argument("--headless=new")
+
+    service = Service(ChromeDriverManager().install())
+    drv = webdriver.Chrome(service=service, options=opts)
+    drv.implicitly_wait(6)
+    return drv
+
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
+import requests
+from bs4 import BeautifulSoup
+
+# ==================== 基本配置 ====================
 # 可用环境变量 DINGTALK_WEBHOOK 覆盖；默认用你给的 webhook
 DINGTALK_WEBHOOK = os.getenv(
     "DINGTALK_WEBHOOK",
@@ -178,19 +247,43 @@ def split_and_send(title_prefix: str, full_text: str, chunk_size=4500):
         send_to_dingtalk_markdown(title, part)
 
 # ==================== Selenium 与“时间范围：一周内” ====================
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import os
+
 def build_driver():
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
     opts = Options()
-    opts.add_argument("--disable-blink-features=AutomationControlled")
+    # 推荐无头运行，方便 GitHub Actions 执行
+    if os.getenv("HEADLESS", "1") == "1":
+        opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-gpu")
-    # 调试期建议有头；稳定后可无头： opts.add_argument("--headless=new")
-    try:
-        drv = webdriver.Chrome(options=opts)  # Selenium Manager
-    except Exception:
-        from webdriver_manager.chrome import ChromeDriverManager
-        drv = webdriver.Chrome(ChromeDriverManager().install(), options=opts)
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    # ✅ Selenium 4 正确写法：用 Service 传入驱动路径
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.implicitly_wait(6)
+    return driver
+
+def build_driver():
+    opts = Options()
+    # 云端/无头环境推荐的参数
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    # 用 Service 正确传入 driver，可复用本地或 CI 环境
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
+    driver.implicitly_wait(6)
+    return driver
+
     drv.implicitly_wait(6)
     return drv
 
