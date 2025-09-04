@@ -2,52 +2,56 @@
 """
 HR 资讯自动抓取（工作日 8:30 推送到“HR 机器人”）
 依赖：requests, beautifulsoup4, lxml
-Secrets（建议为 HR 机器人单独配置，避免混用）:
+Secrets（HR 专用）:
 - DINGTALK_WEBHOOKHR（必填：HR 群机器人 webhook）
-- DINGTALK_SECRET_HR（可选：若 HR 机器人开启“加签”）
-- DINGTALK_KEYWORD_HR（可选：若 HR 机器人开启“关键字”）
+- DINGTALK_SECRET_HR（必填：若开启“加签”，就是 SEC... 那串）
+- DINGTALK_KEYWORD_HR（可选：若开启“关键字”）
 """
 import os, re, time, csv, json, hmac, base64, hashlib, urllib.parse
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-# ========== 钉钉推送（HR 专用） ==========
+# ========== 钉钉推送（HR 专用，带加签） ==========
 def _sign_webhook(base_webhook: str, secret: str) -> str:
-    if not (secret and base_webhook): 
+    """按钉钉规则生成签名并拼接到 webhook 上"""
+    if not (secret and base_webhook):
         return base_webhook
     ts = str(round(time.time()*1000))
-    string_to_sign = f"{ts}\n{secret}"
-    hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
+    hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign, digestmod=hashlib.sha256).digest()
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
     return f"{base_webhook}&timestamp={ts}&sign={sign}"
 
 def send_to_dingtalk_markdown_hr(title: str, md_text: str) -> bool:
     """
-    优先读 HR 专用变量；没有就尝试通用变量做兜底，防止忘记配置。
+    使用 HR 专用 Secrets 发送 Markdown 到钉钉。
+    必填：DINGTALK_WEBHOOKHR, DINGTALK_SECRET_HR（加签）
+    可选：DINGTALK_KEYWORD_HR（关键字）
     """
-    base = (os.getenv("DINGTALK_WEBHOOKHR") or os.getenv("DINGTALK_WEBHOOK") or "").strip()
+    base = (os.getenv("DINGTALK_WEBHOOKHR") or "").strip()
+    secret = (os.getenv("DINGTALK_SECRET_HR") or "").strip()
     if not base:
-        print("❌ 未设置 HR 机器人的 webhook（DINGTALK_WEBHOOKHR）"); 
-        return False
+        print("❌ 未设置 DINGTALK_WEBHOOKHR"); return False
+    if not secret:
+        print("❌ 未设置 DINGTALK_SECRET_HR（加签密钥）"); return False
 
-    secret = (os.getenv("DINGTALK_SECRET_HR") or os.getenv("DINGTALK_SECRET") or "").strip()
-    keyword = (os.getenv("DINGTALK_KEYWORD_HR") or os.getenv("DINGTALK_KEYWORD") or "").strip()
-
+    kw = (os.getenv("DINGTALK_KEYWORD_HR") or "").strip()
     webhook = _sign_webhook(base, secret)
-    if keyword and (keyword not in title and keyword not in md_text):
-        title = f"{keyword} | {title}"
+    if kw and (kw not in title and kw not in md_text):
+        title = f"{kw} | {title}"
 
     payload = {"msgtype":"markdown","markdown":{"title":title,"text":md_text}}
     try:
         r = requests.post(webhook, json=payload, timeout=20)
         print("HR DingTalk resp:", r.status_code, r.text[:300])
-        return (r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("errcode") == 0)
+        ok = (r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("errcode") == 0)
+        return ok
     except Exception as e:
         print("❌ HR 钉钉异常：", e)
         return False
 
-# ========== 爬虫主体 ==========
+# ========== 爬虫主体（示例源，后续你可替换为真实源） ==========
 class HRNewsCrawler:
     def __init__(self):
         self.session = requests.Session()
@@ -57,29 +61,28 @@ class HRNewsCrawler:
         self.results = []
 
     def get_recent_hr_news(self):
-        """聚合多源，抓近两个月 HR 资讯（多处容错，不因单源失败而中断）"""
+        """抓近两个月 HR 资讯；多源容错"""
         print("开始抓取 HR 资讯…")
         for fn in (self.crawl_beijing_hrss, self.crawl_mock_mohrss, self.crawl_mock_portals):
             try:
                 fn()
                 time.sleep(1.0)
             except Exception as e:
-                print(f"[WARN] 来源函数异常：{fn.__name__} -> {e}")
+                print(f"[WARN] 来源异常：{fn.__name__} -> {e}")
         return self.results
 
-    # —— 北京人社局（示例解析，选择多个列表样式做容错） ——
+    # —— 北京人社局（示例解析，尽量兼容不同列表结构） ——
     def crawl_beijing_hrss(self):
         print("抓取：北京人社局…")
         base = "https://rsj.beijing.gov.cn"
         paths = ["/xxgk/tzgg/", "/xxgk/gzdt/", "/xxgk/zcfg/"]
         selectors = [".list li", ".news-list li", ".content-list li", "ul li"]
-
         for p in paths:
             url = base + p
             try:
                 r = self.session.get(url, headers=self.headers, timeout=15)
                 r.encoding = "utf-8"
-                if r.status_code != 200:
+                if r.status_code != 200: 
                     continue
                 soup = BeautifulSoup(r.text, "html.parser")
                 items = []
@@ -91,9 +94,9 @@ class HRNewsCrawler:
             except Exception as e:
                 print(f"[WARN] 北京人社局 {p} 解析失败：{e}")
 
-    # —— 人社部 & 门户：为保证云端稳定，先用示例数据占位（你后续可改成真实接口） ——
+    # —— 人社部 / 门户：先用示例数据占位，稳定云端流程；后续可替换为真实接口 ——
     def crawl_mock_mohrss(self):
-        print("抓取：人社部（示例数据）…")
+        print("抓取：人社部（示例）…")
         mock = [
             {"title":"人社部发布最新就业促进措施",
              "url":"https://www.mohrss.gov.cn/example/1.html","source":"人社部",
@@ -103,7 +106,7 @@ class HRNewsCrawler:
         self._take_if_recent(mock)
 
     def crawl_mock_portals(self):
-        print("抓取：HR 门户（示例数据）…")
+        print("抓取：HR 门户（示例）…")
         mock = [
             {"title":"2025Q3人力资源市场供需报告","url":"https://portal.example/1",
              "source":"中国人力资源网","date":(datetime.now()-timedelta(days=20)).strftime('%Y-%m-%d'),
@@ -114,7 +117,7 @@ class HRNewsCrawler:
         ]
         self._take_if_recent(mock)
 
-    # —— 工具方法 ——
+    # —— 工具 —— 
     def _take_if_recent(self, items, days=60):
         for n in items:
             if self._is_recent(n.get("date",""), days):
@@ -128,12 +131,9 @@ class HRNewsCrawler:
         if not href: return
         full = href if href.startswith("http") else (base_url + href if href.startswith("/") else "")
         if not full: return
-
-        # 尝试从行内文本抓日期
         text = li.get_text(" ", strip=True)
         m = re.search(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", text)
         date_str = (m.group(0).replace('/', '-') if m else (datetime.now()-timedelta(days=30)).strftime('%Y-%m-%d'))
-
         if self._is_recent(date_str):
             self.results.append({
                 "title": title, "url": full, "source": source,
@@ -147,7 +147,7 @@ class HRNewsCrawler:
                 return (datetime.now() - d).days <= days
             except: 
                 continue
-        return True  # 不可解析时不过滤（保证不中断）
+        return True  # 解析失败不过滤，保证不中断
 
     def save_results(self, fmt="csv"):
         if not self.results:
@@ -181,10 +181,9 @@ def main():
     crawler.get_recent_hr_news()
     crawler.display_results()
 
-    # 固定自动保存（CI 环境不能 input）
     saved = crawler.save_results("csv") if crawler.results else None
 
-    # 组织推送
+    # 组织推送（前 8 条）
     if crawler.results:
         topk = min(8, len(crawler.results))
         lines = [f"### HR资讯播报（{datetime.now().strftime('%Y-%m-%d')}）\n共 {len(crawler.results)} 条，Top {topk} 如下：\n"]
@@ -195,7 +194,7 @@ def main():
         ok = send_to_dingtalk_markdown_hr("HR资讯播报", "\n".join(lines))
         print("HR 钉钉推送：", "成功" if ok else "失败")
     else:
-        send_to_dingtalk_markdown_hr("HR资讯播报", "今日暂无近两个月内的人力资源相关资讯。")
+        send_to_dingtalk_markdown_hr("HR资讯播报", "今日暂无近两个月内的人力资源资讯。")
 
     print("✅ HR 任务完成。")
 
