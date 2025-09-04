@@ -1,32 +1,42 @@
-import time
-import hmac
-import hashlib
-import base64
-import urllib.parse
-import requests
-import os
+name: run-hr-news
 
-# 从环境变量里拿 webhook 和 secret
-WEBHOOK = os.getenv("DINGTALK_WEBHOOKHR")
-SECRET = os.getenv("DINGTALK_SECRET_HR")
+on:
+  schedule:
+    # 工作日 北京时间 8:30（UTC 0:30）
+    - cron: "30 0 * * 1-5"
+  workflow_dispatch: {}
 
-def send_dingtalk_msg(content: str):
-    timestamp = str(round(time.time() * 1000))  # 毫秒级时间戳
-    secret_enc = SECRET.encode('utf-8')
-    string_to_sign = '{}\n{}'.format(timestamp, SECRET).encode('utf-8')
-    hmac_code = hmac.new(secret_enc, string_to_sign, digestmod=hashlib.sha256).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-    url = f"{WEBHOOK}&timestamp={timestamp}&sign={sign}"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "msgtype": "text",
-        "text": {"content": content}
-    }
-    resp = requests.post(url, json=data, headers=headers)
-    print("钉钉返回:", resp.text)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-# 示例调用
-if __name__ == "__main__":
-    send_dingtalk_msg("测试：这是带加签的钉钉推送 ✅")
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run HR News script
+        env:
+          DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
+          DINGTALK_SECRET_HR:  ${{ secrets.DINGTALK_SECRET_HR }}     # 必填（开了加签）
+          DINGTALK_KEYWORD_HR: ${{ secrets.DINGTALK_KEYWORD_HR }}   # 可选（开了关键字再配）
+        run: |
+          python hr_news.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr-news-output
+          path: |
+            hr_news_*.csv
+            hr_news_*.json
