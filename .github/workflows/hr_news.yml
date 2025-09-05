@@ -1,8 +1,6 @@
 name: run-hr-news
-
 on:
   schedule:
-    # 工作日 北京时间 08:30（UTC 00:30）
     - cron: "30 0 * * 1-5"
   workflow_dispatch: {}
   push:
@@ -11,25 +9,20 @@ on:
     paths:
       - "hr_news.py"
       - ".github/workflows/hr_news.yml"
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
-
       - name: Check HR secrets (no leak)
         env:
           DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
@@ -37,11 +30,10 @@ jobs:
         run: |
           python - <<'PY'
           import os
-          for k in ["DINGTALK_WEBHOOKHR","DINGTALK_SECRET_HR"]:
+          for k in ("DINGTALK_WEBHOOKHR","DINGTALK_SECRET_HR"):
               v = os.getenv(k, "")
               print(f"{k}: {'OK' if v else 'MISSING'} (len={len(v)})")
           PY
-
       - name: Run HR News
         env:
           DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
@@ -50,7 +42,6 @@ jobs:
           KEYWORDS_HR: "人社,就业,社保,人才,用工,劳动,技能,培训"
         run: |
           python hr_news.py
-
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
