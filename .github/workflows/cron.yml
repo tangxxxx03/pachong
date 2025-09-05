@@ -3,7 +3,7 @@ name: run-pachong
 on:
   schedule:
     # 每天北京时间 9 点运行（GitHub 用 UTC，要写 1 点）
-    - cron: "30 0 * * 1-5"
+    - cron: "*/15 * * * 1-5"
   workflow_dispatch: {}  # 允许手动触发
 
 jobs:
