@@ -5,9 +5,9 @@ on:
     # 工作日 北京时间 08:30（UTC 00:30）
     - cron: "30 0 * * 1-5"
   workflow_dispatch: {}
-  # 便于你调试/更新脚本时立即触发一次
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - "hr_news.py"
       - ".github/workflows/hr_news.yml"
@@ -30,7 +30,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      # 可选：自检 secrets 是否就绪（不会泄露内容）
       - name: Check HR secrets (no leak)
         env:
           DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
