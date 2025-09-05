@@ -2,9 +2,16 @@ name: run-pachong
 
 on:
   schedule:
-    # 每天北京时间 9 点运行（GitHub 用 UTC，要写 1 点）
-    - cron: "*/15 * * * 1-5"
-  workflow_dispatch: {}  # 允许手动触发
+    # ✅ 正式：工作日 北京时间 08:30 运行（UTC 00:30）
+    - cron: "30 0 * * 1-5"
+    # ⛳️ 如果还要测试每 15 分钟运行一次，改为下面这一行（二选一）
+    # - cron: "*/15 * * * 1-5"
+  workflow_dispatch: {}   # 保留手动按钮做调试
+
+# 防止你连续点多次或同时间重复触发造成并发重复
+concurrency:
+  group: pachong-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -17,9 +24,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      # ✅ 安装 Chrome（Selenium 需要浏览器）
+      # 安装 Chrome（Selenium 需要浏览器）
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
         with:
@@ -28,13 +35,42 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # 有 requirements.txt 就按它装；没有也不报错
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # 兜底：保证 selenium / webdriver-manager 等关键包存在
+          pip install -q --upgrade selenium webdriver-manager requests beautifulsoup4 lxml
 
-      - name: Run script
+      # 可选：自检一下 Secrets 是否存在（不输出具体值）
+      - name: Check DingTalk secrets (no leak)
         env:
-          # 可选：把钉钉 Webhook 放到仓库 Settings → Secrets → Actions 里
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          # 让浏览器无头运行（和 build_driver 配合）
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}     # 开启“加签”才需要
+          DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}   # 开启“关键字”才需要
+        run: |
+          python - <<'PY'
+          import os
+          for k in ("DINGTALK_WEBHOOK","DINGTALK_SECRET","DINGTALK_KEYWORD"):
+              v = os.getenv(k, "")
+              print(f"{k}: {'OK' if v else 'MISSING'} (len={len(v)})")
+          PY
+
+      # ✅ 只有 schedule（定时）时才真正发送
+      - name: Run pachong (send)
+        if: github.event_name == 'schedule'
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}     # 若机器人开启“加签”
+          DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}   # 若机器人开启“关键字”
           HEADLESS: "1"
         run: |
           python main.py
+
+      # 🔎 手动/调试时只跑、不发（若不需要调试可删掉这一步）
+      - name: Run pachong (dry-run)
+        if: github.event_name != 'schedule'
+        env:
+          HEADLESS: "1"
+        run: |
+          # 如果 main.py 无 --dry-run，可以在脚本里用环境变量控制“不发送”
+          export DRY_RUN=1
+          python main.py || true
