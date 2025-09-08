@@ -1,29 +1,24 @@
 name: run-hr-news
 
-name: run-hr-news
-
 on:
   schedule:
-    - cron: "30 0 * * 1-5"   # 工作日 北京时间 08:30（UTC 00:30）
-  workflow_dispatch: {}       # 保留手动按钮调试
-  push:                       # 👈 注意这里 push 要和上面平级
-    paths:
-      - "hr_news.py"
-      - ".github/workflows/hr_news.yml"
-
+    - cron: "30 0 * * 1-5"        # 工作日 北京时间 08:30（UTC 00:30）
+  workflow_dispatch: {}            # 手动触发
 
 concurrency:
   group: hr-news-${{ github.ref }}
-  cancel-in-progress: true         # 防并发重复
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
@@ -41,7 +36,7 @@ jobs:
               print(f"{k}: {'OK' if v else 'MISSING'} (len={len(v)})")
           PY
 
-      # ✅ 只有 schedule（定时）时才真正发送
+      # 只有 schedule（定时）时才真正发送
       - name: Run HR News (send)
         if: github.event_name == 'schedule'
         env:
@@ -52,7 +47,7 @@ jobs:
         run: |
           python hr_news.py
 
-      # 🔎 手动 / push 触发时只跑脚本做预览（不发），不需要可删掉此步
+      # 手动 / push 触发时只跑脚本预览（不发）
       - name: Run HR News (dry-run)
         if: github.event_name != 'schedule'
         run: |
