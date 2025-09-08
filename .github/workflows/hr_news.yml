@@ -1,13 +1,16 @@
 name: run-hr-news
 
+name: run-hr-news
+
 on:
   schedule:
-    - cron: "30 0 * * 1-5"        # 工作日 北京时间 08:00（UTC 00:00）
-  workflow_dispatch: {}            # 保留手动按钮调试
-  # 如不需要 push 触发，可以直接删除下面两行
+    - cron: "30 0 * * 1-5"   # 工作日 北京时间 08:30（UTC 00:30）
+  workflow_dispatch: {}       # 保留手动按钮调试
+  push:                       # 👈 注意这里 push 要和上面平级
     paths:
       - "hr_news.py"
       - ".github/workflows/hr_news.yml"
+
 
 concurrency:
   group: hr-news-${{ github.ref }}
