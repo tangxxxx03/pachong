@@ -5,8 +5,6 @@ on:
     - cron: "30 0 * * 1-5"        # 工作日 北京时间 08:00（UTC 00:00）
   workflow_dispatch: {}            # 保留手动按钮调试
   # 如不需要 push 触发，可以直接删除下面两行
-  push:
-    branches: [ main ]
     paths:
       - "hr_news.py"
       - ".github/workflows/hr_news.yml"
