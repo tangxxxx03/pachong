@@ -1,17 +1,9 @@
-name: run-pachong
+name: run-pachong-outsourcing
 
 on:
   schedule:
-    # 工作日 8:30（UTC=00:30）
-    - cron: "30 0 * * 1-5"
-  workflow_dispatch:
-    inputs:
-      send:
-        description: "手动触发是否发送到钉钉？"
-        type: choice
-        required: true
-        default: "no"
-        options: ["no", "yes"]
+    - cron: "30 0 * * 1-5"  # 北京时间 08:30（UTC 00:30）
+  workflow_dispatch: {}     # 允许手动
 
 concurrency:
   group: pachong-${{ github.ref }}
@@ -20,7 +12,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -36,37 +27,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install selenium requests pdfplumber pandas lxml
 
-      - name: Check DingTalk secrets (no leak)
-        env:
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}   # 招投标用这个 webhook（无加签就只填这个）
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}    # 开了加签才需要，没开就别配
-          DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}   # 没启关键字也可以不配
-        run: |
-          python - <<'PY'
-          import os
-          for k in ("DINGTALK_WEBHOOK","DINGTALK_SECRET","DINGTALK_KEYWORD"):
-              v = os.getenv(k, "")
-              print(f"{k}: {'OK' if v else 'MISSING'} (len={len(v)})")
-          PY
-
-      # ✅ 满足：定时触发 或 手动触发且选择了 yes 才真正发送
       - name: Run pachong (send)
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.send == 'yes')
         env:
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
-          DINGTALK_KEYWORD: ${{ secrets.DINGTALK_KEYWORD }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }} # 必填：在仓库 Settings → Secrets → Actions 配置
+          HEADLESS: "1"                # CI 建议无头
+          DUE_FILTER_DAYS: "30"        # 保留未来 30 天内截止的招标
+          SKIP_EXPIRED: "true"         # 丢弃已过期
+          KEYWORDS: "外包,派遣"         # 可改
+          CRAWL_BEIJING: "true"
+          CRAWL_ZSXTZB: "true"
         run: |
           python main.py
-
-      # 🔎 其他情况（手动但选择 no、或 push）只跑不发，方便看日志
-      - name: Run pachong (dry-run)
-        if: github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.send == 'yes')
-        env:
-          DRY_RUN: "1"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
-        run: |
-          python main.py || true
