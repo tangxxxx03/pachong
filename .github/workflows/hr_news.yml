@@ -1,63 +1,83 @@
-name: run-hr-news
+name: HR News Crawler (Today Only)
 
 on:
   schedule:
-    - cron: "30 0 * * 1-5"        # 工作日 北京时间 08:30（UTC 00:30）
-  workflow_dispatch: {}            # 手动触发
-
-concurrency:
-  group: hr-news-${{ github.ref }}
-  cancel-in-progress: true
+    - cron: "0 0 * * 1-5"    # 每个工作日 08:00 北京时间运行（UTC+0 的 0 点）
+  workflow_dispatch:         # 允许手动运行
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests beautifulsoup4 urllib3
 
-      - name: Check HR secrets (no leak)
+      - name: Run crawler
         env:
-          DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
-          DINGTALK_SECRET_HR:  ${{ secrets.DINGTALK_SECRET_HR }}
-        run: |
-          python - <<'PY'
-          import os
-          for k in ("DINGTALK_WEBHOOKHR","DINGTALK_SECRET_HR"):
-              v = os.getenv(k, "")
-              print(f"{k}: {'OK' if v else 'MISSING'} (len={len(v)})")
-          PY
+          # ===== 基本设置 =====
+          HR_ONLY_TODAY: "1"               # 只抓当天
+          HR_TZ: "Asia/Shanghai"           # 判定当天的时区
+          HR_SAVE_FORMAT: "both"           # 导出 csv + json
+          HR_MAX_ITEMS: "12"               # 每站点最多条数
+          # 可选：关键词（媒体站点会过滤标题/摘要）
+          HR_KEYWORDS: "人社,就业,社保,养老,工伤,失业,用工,招聘,人才,人力资源,劳动,劳务,薪酬,工资,薪资,社保缴费,医保,职称,工时,灵活用工"
 
-      # 只有 schedule（定时）时才真正发送
-      - name: Run HR News (send)
-        if: github.event_name == 'schedule'
-        env:
+          # ===== 指定“具体栏目 URL”（多个用逗号分隔）=====
+          # 人社部（建议：工作动态、通知公告）
+          SRC_MOHRSS_URLS: "https://www.mohrss.gov.cn/SYrlzyhshbzb/zwgk/gzdt/index.html,https://www.mohrss.gov.cn/SYrlzyhshbzb/zwgk/tzgg/index.html"
+
+          # 北京市人社局（已较稳定）
+          SRC_RSJ_BJ_URLS: "https://rsj.beijing.gov.cn/xxgk/tzgg/,https://rsj.beijing.gov.cn/xxgk/gzdt/,https://rsj.beijing.gov.cn/xxgk/zcfg/"
+
+          # 人民网 / 光明日报 / 新华网（媒体建议你换成更贴近“人社/就业/社保”的频道页）
+          SRC_PEOPLE_URLS: "http://www.people.com.cn/"
+          SRC_GMW_URLS: "https://www.gmw.cn/"
+          SRC_XINHUA_URLS: "https://www.xinhuanet.com/"
+
+          # 中国人力资源市场网 / 公共招聘网 / 国家人才网
+          SRC_CHRM_URLS: "https://chrm.mohrss.gov.cn/"
+          SRC_JOB_MOHRSS_URLS: "http://job.mohrss.gov.cn/"
+          SRC_NEWJOBS_URLS: "https://www.newjobs.com.cn/"
+          SRC_NEWJOBS_POLICY_URLS: "https://www.newjobs.com.cn/"
+
+          # 国家社会保险平台 / 税务总局（给了更具体的栏目例子）
+          SRC_SI_12333_URLS: "https://si.12333.gov.cn/"
+          SRC_CHINATAX_URLS: "https://www.chinatax.gov.cn/n810219/n810724/index.html,https://www.chinatax.gov.cn/n810341/n810755/index.html"
+
+          # 北京市司法局 / 国家统计局（统计局用“新闻发布”页）
+          SRC_BJ_SFJ_URLS: "https://sfj.beijing.gov.cn/zwgk/zyxw/index.html,https://sfj.beijing.gov.cn/zwgk/tztg/index.html"
+          SRC_STATS_URLS: "https://www.stats.gov.cn/sj/zxfb/"
+
+          # 三茅 / HRoot / 中人网（如遇登录墙，换公开栏目 URL）
+          SRC_HRLOO_URLS: "https://www.hrloo.com/"
+          SRC_HROOT_URLS: "https://www.hroot.com/"
+          SRC_CHINAHRM_URLS: "https://www.chinahrm.cn/"
+
+          # （可选）北京人力资源服务协会/行业协会：把他们的“新闻/公告”页面填进来
+          # SRC_BJ_HR_ASSOC_URLS: "https://<协会官网>/news/,https://<协会官网>/notice/"
+
+          # ===== 钉钉（用 Secrets，别写死）=====
           DINGTALK_WEBHOOKHR: ${{ secrets.DINGTALK_WEBHOOKHR }}
-          DINGTALK_SECRET_HR:  ${{ secrets.DINGTALK_SECRET_HR }}
+          DINGTALK_SECRET_HR: ${{ secrets.DINGTALK_SECRET_HR }}
           DINGTALK_KEYWORD_HR: ${{ secrets.DINGTALK_KEYWORD_HR }}
-          KEYWORDS_HR: "人社,就业,社保,人才,用工,劳动,技能,培训"
         run: |
-          python hr_news.py
-
-      # 手动 / push 触发时只跑脚本预览（不发）
-      - name: Run HR News (dry-run)
-        if: github.event_name != 'schedule'
-        run: |
-          python hr_news.py --dry-run || true
+          python hr_news_crawler.py
 
       - name: Upload artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hr-news-output
           path: |
-            hr_news_*.csv
-            hr_news_*.json
+            *.csv
+            *.json
+          if-no-files-found: ignore
