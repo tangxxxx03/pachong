@@ -2,7 +2,7 @@ name: run-pachong-outsourcing
 
 on:
   schedule:
-    - cron: "35 0 * * 1-5"   # 北京 08:35（UTC 00:35），错峰更稳
+    - cron: "35 0 * * 1-5"   # 北京 08:35（UTC 00:35）错峰
   workflow_dispatch: {}
 
 concurrency:
@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 安装 Google Chrome（关键，避免“昨天有、今天没”的波动）
+      # 安装 Chrome（关键，避免 runner 变更导致无浏览器）
       - uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
@@ -54,5 +54,5 @@ jobs:
           NO_PROXY: "localhost,127.0.0.1,::1"
           HEADLESS: "1"
           KEYWORDS: "外包,派遣"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}   # ← 仓库Secrets里配置
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
         run: python main.py
