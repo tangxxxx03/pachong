@@ -14,15 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # ✅ 统一 env（每个键只出现一次）
     env:
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      ALL_PROXY: ""
-      NO_PROXY: "localhost,127.0.0.1,::1"
+      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
       HEADLESS: "1"
       KEYWORDS: "外包,派遣"
-      DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
 
     steps:
       - uses: actions/checkout@v4
