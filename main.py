@@ -10,7 +10,7 @@ import pdfplumber
 from io import BytesIO
 from urllib.parse import urlparse, urljoin
 
-# —— HTTP 会话：禁用环境代理 + 重试 —— #
+# ========== HTTP 会话（禁用环境代理 + 重试） ==========
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -25,13 +25,13 @@ _SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
 _SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
 _SESSION.headers.update({"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"})
 
-# Selenium
+# ========== Selenium ==========
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
-# ================= 配置（可被环境变量覆盖） =================
+# ================== 配置（可被环境变量覆盖） ==================
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()
 KEYWORDS = [k.strip() for k in os.getenv("KEYWORDS", "外包,派遣").split(",") if k.strip()]
 CRAWL_BEIJING = os.getenv("CRAWL_BEIJING", "true").lower() in ("1","true","yes","y")
@@ -39,7 +39,7 @@ CRAWL_ZSXTZB  = os.getenv("CRAWL_ZSXTZB",  "true").lower() in ("1","true","yes",
 DUE_FILTER_DAYS = int(os.getenv("DUE_FILTER_DAYS", "30"))
 SKIP_EXPIRED = os.getenv("SKIP_EXPIRED", "true").lower() in ("1","true","yes","y")
 HEADLESS = os.getenv("HEADLESS", "1").lower() in ("1","true","yes","y")
-# ===========================================================
+# ============================================================
 
 def send_to_dingtalk_markdown(title: str, md_text: str, webhook: str = None):
     webhook = (webhook or DINGTALK_WEBHOOK).strip()
@@ -284,7 +284,7 @@ def parse_award_fields(detail_html: str, detail_text: str, current_url: str = ""
     data["中标日期"] = award_date if award_date else "暂无"
     return data
 
-# -------- Selenium：容器友好 --------
+# -------- Selenium（容器友好） --------
 def _build_driver():
     opts = Options()
     opts.add_argument("--disable-blink-features=AutomationControlled")
@@ -303,10 +303,308 @@ def _build_driver():
     driver.set_script_timeout(45)
     return driver
 
-# -------- 站点一：北京公共资源交易平台 --------
-# （下方 crawl_beijing / crawl_zsxtzb_search / 打包发送等函数与之前一致，略去注释）
-# ……（此处保持你原有逻辑，完整代码请直接复制我这份）
-# 由于内容较长，这里不再删节；上面改动已包含在整份文件中。
-# —— 为避免消息过长，我不再重复贴下面大段函数 —— 
-# 你可以直接把本消息整段 `main.py` 复制粘贴覆盖原文件（我已包含全部函数）。
-# （如需我再重新完整贴一次也没问题）
+# ================== 站点一：北京公共资源交易平台 ==================
+def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
+    driver = _build_driver()
+    all_bidding, all_award, seen_links = [], [], set()
+    try:
+        for kw in keywords:
+            url = f"https://ggzyfw.beijing.gov.cn/elasticsearch/index.jsp?qt={kw}"
+            driver.get(url); time.sleep(3.0)
+            # 时间过滤：一周
+            try:
+                driver.find_element(By.XPATH, "//span[contains(text(),'时间不限')]").click(); time.sleep(0.6)
+                driver.find_element(By.ID, "week").click(); time.sleep(1.0)
+            except Exception:
+                pass
+            for page in range(1, max_pages + 1):
+                cards = driver.find_elements(By.CLASS_NAME, "cs_search_content_box")
+                for c in cards:
+                    try:
+                        title_el = c.find_element(By.CLASS_NAME, "cs_search_title")
+                        title = title_el.text.strip()
+                        ann_type = classify(title)
+                        if ann_type not in ("招标公告","中标公告"): continue
+
+                        content = c.find_element(By.CLASS_NAME, "cs_search_content_p").text
+                        source_line = c.find_element(By.CLASS_NAME, "cs_search_content_time").text
+                        info_source, pub_time = "", ""
+                        if "发布时间：" in source_line:
+                            parts = source_line.split("发布时间：")
+                            info_source = parts[0].replace("信息来源：","").strip()
+                            pub_time = parts[1].strip()
+                        pub_date = pub_time[:10] if pub_time else ""
+                        if date_start and date_end and pub_date:
+                            if pub_date < date_start or pub_date > date_end:
+                                continue
+
+                        try:
+                            url_link = title_el.find_element(By.TAG_NAME, "a").get_attribute("href")
+                        except Exception:
+                            url_link = ""
+
+                        if url_link and url_link in seen_links: continue
+                        seen_links.add(url_link)
+
+                        # 打开详情
+                        detail_text, detail_html = "", ""
+                        if url_link:
+                            win = driver.current_window_handle
+                            driver.execute_script('window.open(arguments[0])', url_link)
+                            driver.switch_to.window(driver.window_handles[-1]); time.sleep(1.2)
+                            detail_html = driver.page_source
+                            detail_text = extract_detail_text_with_pdf_fallback(driver, detail_html, url_link) or content
+                            driver.close(); driver.switch_to.window(win)
+
+                        if ann_type == "招标公告":
+                            fields = parse_bidding_fields(detail_text)
+                            due_str = fields.get("投标截止","")
+                            due_dt  = _to_datetime(due_str)
+                            keep = True; now = datetime.now()
+                            if SKIP_EXPIRED and due_dt and due_dt < now: keep = False
+                            if keep and DUE_FILTER_DAYS > 0 and due_dt and due_dt > now + timedelta(days=DUE_FILTER_DAYS): keep = False
+                            if keep:
+                                all_bidding.append({
+                                    "公告类型":"公开招标公告",
+                                    "公告标题": title,
+                                    "公告发布时间": pub_time or "暂无",
+                                    "行业类型": fields["行业类型"],
+                                    "金额": fields["金额"],
+                                    "简要摘要": fields["简要摘要"],
+                                    "联系人": fields["联系人"],
+                                    "联系电话": fields["联系电话"],
+                                    "投标截止": due_str or "暂无",
+                                    "公告网址": url_link or "暂无",
+                                    "信息来源": info_source or "暂无",
+                                })
+                        else:
+                            fields = parse_award_fields(detail_html, detail_text, current_url=url_link)
+                            all_award.append({
+                                "中标日期": fields["中标日期"] if fields["中标日期"] != "暂无" else (pub_date or "暂无"),
+                                "中标公司": fields["中标公司"],
+                                "中标金额": fields["中标金额"],
+                                "中标内容": fields["中标内容"],
+                                "评审得分": fields["评审得分"],
+                                "原招标网址": fields["原招标网址"],
+                                "中标网址": url_link or "暂无",
+                                "标题": title,
+                                "发布时间": pub_time or "暂无",
+                                "信息来源": info_source or "暂无"
+                            })
+                    except Exception as ex:
+                        print("解析一条出错：", ex)
+                # 翻页
+                try:
+                    next_btn = driver.find_element(By.LINK_TEXT, "下一页")
+                    if "disable" in (next_btn.get_attribute("class") or "") or next_btn.get_attribute("aria-disabled") == 'true':
+                        break
+                    if page < max_pages:
+                        driver.execute_script("arguments[0].click();", next_btn); time.sleep(1.0)
+                except Exception:
+                    break
+    finally:
+        driver.quit()
+    return all_bidding, all_award
+
+# ================== 站点二：zsxtzb.cn 聚合搜索 ==================
+def _zs_search_url(keyword, page=1):
+    base = f"https://www.zsxtzb.cn/search?keyword={keyword}"
+    if page > 1: base += f"&page={page}"
+    return base
+
+def _zs_pick_list_items(driver):
+    items = []
+    lis = driver.find_elements(By.XPATH, "//div[contains(@class,'search') or contains(@class,'result') or contains(@class,'list')]//li[a]")
+    for li in lis:
+        try:
+            a = li.find_element(By.TAG_NAME, "a")
+            title = a.text.strip(); href = a.get_attribute("href")
+            raw = li.text; dt = _date_in_text(raw)
+            if title and href: items.append((title, href, dt))
+        except Exception: pass
+    if not items:
+        blocks = driver.find_elements(By.XPATH, "//div[contains(@class,'search') or contains(@class,'result') or contains(@class,'list')]//h3[a]")
+        for b in blocks:
+            try:
+                a = b.find_element(By.TAG_NAME, "a")
+                title = a.text.strip(); href = a.get_attribute("href")
+                raw = b.text; dt = _date_in_text(raw)
+                if not dt:
+                    try:
+                        sib = b.find_element(By.XPATH, "./following-sibling::*[1]")
+                        dt = _date_in_text(sib.text)
+                    except Exception: pass
+                if title and href: items.append((title, href, dt))
+            except Exception: pass
+    if not items:
+        anchors = driver.find_elements(By.XPATH, "//div[contains(@class,'container') or contains(@class,'content') or contains(@id,'content')]//a")
+        bad = ["首页","上一页","下一页","末页","更多","下载","返回"]
+        for a in anchors:
+            try:
+                title = (a.text or "").strip(); href = a.get_attribute("href") or ""
+                if not title or not href: continue
+                if any(b in title for b in bad): continue
+                parent_text = a.find_element(By.XPATH, "./ancestor::*[self::li or self::div][1]").text
+                dt = _date_in_text(parent_text)
+                items.append((title, href, dt))
+            except Exception: pass
+    return items
+
+def _zs_next_page(driver, cur_page):
+    for xp in ["//a[contains(.,'下一页') or contains(.,'下页')]",
+               "//a[contains(@class,'next')]",
+               f"//a[normalize-space(text())='{cur_page+1}']",
+               f"//button[normalize-space(text())='{cur_page+1}']"]:
+        try:
+            el = driver.find_element(By.XPATH, xp)
+            driver.execute_script("arguments[0].click();", el); time.sleep(1.0)
+            return True
+        except Exception:
+            pass
+    return False
+
+def crawl_zsxtzb_search(keywords, max_pages=8, date_start=None, date_end=None):
+    driver = _build_driver()
+    all_bidding, all_award, seen = [], [], set()
+    try:
+        for kw in keywords:
+            page = 1
+            while page <= max_pages:
+                url = _zs_search_url(kw, page)
+                print(f"[zsxtzb] {kw} 第{page}页 -> {url}")
+                driver.get(url); time.sleep(1.4)
+
+                items = _zs_pick_list_items(driver)
+                if not items: break
+
+                for title, href, dt in items:
+                    ann_type = classify(title)
+                    if ann_type not in ("招标公告","中标公告"): continue
+                    if href in seen: continue
+                    seen.add(href)
+
+                    pub_date = dt[:10] if dt else ""
+                    if date_start and date_end and pub_date:
+                        if pub_date < date_start or pub_date > date_end: continue
+
+                    win = driver.current_window_handle
+                    driver.execute_script('window.open(arguments[0])', href)
+                    driver.switch_to.window(driver.window_handles[-1]); time.sleep(1.2)
+                    detail_html = driver.page_source
+                    detail_text = extract_detail_text_with_pdf_fallback(driver, detail_html, href)
+                    driver.close(); driver.switch_to.window(win)
+
+                    if ann_type == "招标公告":
+                        fields = parse_bidding_fields(detail_text)
+                        due_str = fields.get("投标截止","")
+                        due_dt  = _to_datetime(due_str)
+                        keep = True; now = datetime.now()
+                        if SKIP_EXPIRED and due_dt and due_dt < now: keep = False
+                        if keep and DUE_FILTER_DAYS > 0 and due_dt and due_dt > now + timedelta(days=DUE_FILTER_DAYS): keep = False
+                        if keep:
+                            all_bidding.append({
+                                "公告类型":"公开招标公告",
+                                "公告标题": title,
+                                "公告发布时间": pub_date or "暂无",
+                                "行业类型": fields["行业类型"],
+                                "金额": fields["金额"],
+                                "简要摘要": fields["简要摘要"],
+                                "联系人": fields["联系人"],
+                                "联系电话": fields["联系电话"],
+                                "投标截止": due_str or "暂无",
+                                "公告网址": href or "暂无",
+                                "信息来源": "zsxtzb聚合搜索",
+                            })
+                    else:
+                        fields = parse_award_fields(detail_html, detail_text, current_url=href)
+                        all_award.append({
+                            "中标日期": fields["中标日期"] if fields["中标日期"] != "暂无" else (pub_date or "暂无"),
+                            "中标公司": fields["中标公司"],
+                            "中标金额": fields["中标金额"],
+                            "中标内容": fields["中标内容"],
+                            "评审得分": fields["评审得分"],
+                            "原招标网址": fields["原招标网址"],
+                            "中标网址": href or "暂无",
+                            "标题": title,
+                            "发布时间": pub_date or "暂无",
+                            "信息来源": "zsxtzb聚合搜索",
+                        })
+                if not _zs_next_page(driver, page): break
+                page += 1
+    finally:
+        driver.quit()
+    return all_bidding, all_award
+
+# ================== Markdown & 推送 ==================
+def md_escape(s: str) -> str:
+    if not isinstance(s, str): s = str(s)
+    return s.replace("|","\\|")
+
+def format_bidding_markdown(items, date_start, date_end):
+    lines = [f"### 【招标公告】{date_start} ~ {date_end} 共 {len(items)} 条"]
+    for idx, it in enumerate(items, 1):
+        url = it.get("公告网址",""); title = md_escape(it.get("公告标题",""))
+        show = f"[{title}]({url})" if url.startswith("http") else title
+        lines.append(f"\n**{idx}. {show}**")
+        lines.append(f"- 公告发布时间：{md_escape(it.get('公告发布时间','暂无'))}")
+        lines.append(f"- 投标截止：{md_escape(it.get('投标截止','暂无'))}")
+        lines.append(f"- 金额：{md_escape(it.get('金额','暂无'))}")
+        lines.append(f"- 联系人：{md_escape(it.get('联系人','暂无'))}")
+        lines.append(f"- 联系电话：{md_escape(it.get('联系电话','暂无'))}")
+        lines.append(f"- 简要摘要：{md_escape(it.get('简要摘要','暂无'))}")
+        lines.append(f"- 信息来源：{md_escape(it.get('信息来源','暂无'))}")
+    return "\n".join(lines)
+
+def format_award_markdown(items, date_start, date_end):
+    lines = [f"### 【中标结果】{date_start} ~ {date_end} 共 {len(items)} 条"]
+    for idx, it in enumerate(items, 1):
+        url = it.get("中标网址",""); title = md_escape(it.get("标题",""))
+        show = f"[{title}]({url})" if url.startswith("http") else title
+        lines.append(f"\n**{idx}. {show}**")
+        lines.append(f"- 中标日期：{md_escape(it.get('中标日期','暂无'))}")
+        lines.append(f"- 中标公司：{md_escape(it.get('中标公司','暂无'))}")
+        lines.append(f"- 中标金额：{md_escape(it.get('中标金额','暂无'))}")
+        lines.append(f"- 评审得分：{md_escape(it.get('评审得分','暂无'))}")
+        lines.append(f"- 中标内容：{md_escape(it.get('中标内容','暂无'))}")
+        yz = it.get("原招标网址","")
+        lines.append(f"- 原招标网址：{('[点击跳转](' + yz + ')') if yz.startswith('http') else '暂无'}")
+        lines.append(f"- 信息来源：{md_escape(it.get('信息来源','暂无'))}")
+        lines.append(f"- 发布时间：{md_escape(it.get('发布时间','暂无'))}")
+    return "\n".join(lines)
+
+def split_and_send(title_prefix: str, full_text: str, webhook: str, chunk_size=4500):
+    n = max(1, math.ceil(len(full_text) / chunk_size))
+    for i in range(n):
+        part = full_text[i*chunk_size:(i+1)*chunk_size]
+        part_title = f"{title_prefix}（{i+1}/{n}）" if n > 1 else title_prefix
+        send_to_dingtalk_markdown(part_title, part, webhook)
+
+# ================== MAIN ==================
+if __name__ == '__main__':
+    date_start, date_end = get_date_range()
+    print(f"采集日期：{date_start} ~ {date_end}")
+    all_bidding, all_award = [], []
+
+    if CRAWL_BEIJING:
+        b1, a1 = crawl_beijing(KEYWORDS, max_pages=10, date_start=date_start, date_end=date_end)
+        all_bidding.extend(b1); all_award.extend(a1)
+
+    if CRAWL_ZSXTZB:
+        b2, a2 = crawl_zsxtzb_search(KEYWORDS, max_pages=8, date_start=date_start, date_end=date_end)
+        all_bidding.extend(b2); all_award.extend(a2)
+
+    summary = (
+        f"【播报】{date_start}~{date_end} 外包/派遣采集完成：招标 {len(all_bidding)} 条，中标 {len(all_award)} 条。\n"
+        f"过滤策略：{'丢弃已过期' if SKIP_EXPIRED else '保留已过期'}；"
+        f"{'仅保留未来 ' + str(DUE_FILTER_DAYS) + ' 天内' if DUE_FILTER_DAYS>0 else '不过滤未来天数'}。"
+    )
+    send_to_dingtalk_markdown("外包/派遣采集汇总", summary, DINGTALK_WEBHOOK)
+
+    if all_bidding:
+        md_bid = format_bidding_markdown(all_bidding, date_start, date_end)
+        split_and_send("招标公告明细", md_bid, DINGTALK_WEBHOOK)
+    if all_award:
+        md_awd = format_award_markdown(all_award, date_start, date_end)
+        split_and_send("中标结果明细", md_awd, DINGTALK_WEBHOOK)
+
+    print("✔ 完成")
