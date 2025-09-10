@@ -140,80 +140,83 @@ class PeopleSearch:
                     pass
         return a_tag, ""
 
-    def run(self):
-        print(f"开始抓取：关键词='{self.keyword}'，仅当天={self.today}，最多 {self.max_pages} 页（注意 people 需延迟）")
-        added_total = 0
-        for page in range(1, self.max_pages + 1):
-            url = self._build_url(page)
-            try:
-                resp = self._get_with_throttle(url, timeout=25)
-                resp.encoding = resp.apparent_encoding or "utf-8"
-                if resp.status_code != 200:
-                    print(f"⚠️ 第{page}页访问失败 {resp.status_code}: {url}")
-                    continue
+   def run(self):
+    print(f"开始抓取：关键词='{self.keyword}'，仅当天={self.today}，最多 {self.max_pages} 页（people 需延迟）")
+    added_total = 0
 
-                soup = BeautifulSoup(resp.text, "html.parser")
-
-                # 更精准：结果区一般在 .content 或 .search 容器下
-                result_root = None
-                for sel in ["div.content", "div.search", "div.main-container", "div.module-common"]:
-                    result_root = soup.select_one(sel)
-                    if result_root: break
-                scan_scope = result_root or soup
-
-                # 结果条目：a 标签（排除导航/翻页）
-                anchors = []
-                for sel in [
-                    "div.content a",
-                    "div.search a",
-                    "a"
-                ]:
-                    anchors = scan_scope.select(sel)
-                    if anchors: break
-
-                added_page = 0
-                for a in anchors:
-                    href = a.get("href") or ""
-                    title = norm(a.get_text())
-                    if not href or not title: continue
-                    # 过滤明显的无效链接（翻页锚点、javascript 等）
-                    if href.startswith("#") or href.startswith("javascript"): 
-                        continue
-                    full_url = urljoin(url, href)
-
-                    block, d = self._locate_block_and_date(a)
-                    if d != self.today:
-                        continue  # 只要当天
-
-                    # 摘要：优先找块内的 p；没有就取块文本
-                    p = block.find("p") if hasattr(block, "find") else None
-                    digest = norm(p.get_text(" ", strip=True)) if p else norm(block.get_text(" ", strip=True))
-                    digest = digest[:160]
-
-                    item = {
-                        "title": title,
-                        "url": full_url,
-                        "source": "人民网（搜索）",
-                        "date": d,
-                        "content": digest
-                    }
-                    if self._push_if_new(item):
-                        added_page += 1
-                        print(f" + {title} | {d}")
-
-                added_total += added_page
-                print(f"第{page}页：当天命中 {added_page} 条。")
-
-                # 不再因为第一页 0 条就提前退出；如果你想快些，可放开以下逻辑：
-                # if page == 1 and added_page == 0:
-                #     break
-
-            except Exception as e:
-                print(f"⚠️ 抓取异常 page={page}: {e}")
+    for page in range(1, self.max_pages + 1):
+        url = self._build_url(page)
+        try:
+            resp = self._get_with_throttle(url, timeout=25)
+            resp.encoding = resp.apparent_encoding or "utf-8"
+            if resp.status_code != 200:
+                print(f"⚠️ 第{page}页访问失败 {resp.status_code}: {url}")
                 continue
 
-        print(f"完成：共抓到 {added_total} 条当天结果。")
-        return self.results
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # 结果区：先锁定容器，再找 li
+            root = None
+            for sel in ["div.article", "div.content", "div.search", "div.main-container", "div.module-common"]:
+                root = soup.select_one(sel)
+                if root:
+                    break
+            scope = root or soup
+
+            # 按“条目 li”解析，确保能看到 .tip-pubtime
+            items = []
+            for sel in ["li.clearfix", "li", "ul li"]:
+                items = scope.select(sel)
+                if items:
+                    break
+
+            added_page = 0
+            for li in items:
+                pub = li.select_one(".tip-pubtime")
+                a   = li.select_one("a[href]")
+                if not pub or not a:
+                    continue
+
+                # 日期只认当天
+                d = find_date_in_text(pub.get_text(" ", strip=True))
+                if d != self.today:
+                    continue
+
+                title = norm(a.get_text())
+                if not title:
+                    continue
+                full_url = urljoin(url, (a.get("href") or "").strip())
+
+                # 摘要优先 .abs，其次第一个 <p>，最后 li 文本
+                abs_el = li.select_one(".abs")
+                if abs_el:
+                    digest = norm(abs_el.get_text(" ", strip=True))
+                else:
+                    p = li.find("p")
+                    digest = norm(p.get_text(" ", strip=True)) if p else norm(li.get_text(" ", strip=True))
+                digest = digest[:160]
+
+                item = {
+                    "title": title,
+                    "url": full_url,
+                    "source": "人民网（搜索）",
+                    "date": d,
+                    "content": digest
+                }
+                if self._push_if_new(item):
+                    added_page += 1
+                    print(f" + {title} | {d}")
+
+            added_total += added_page
+            print(f"第{page}页：当天命中 {added_page} 条。")
+
+        except Exception as e:
+            print(f"⚠️ 抓取异常 page={page}: {e}")
+            continue
+
+    print(f"完成：共抓到 {added_total} 条当天结果。")
+    return self.results
+
 
     def save(self, fmt="both"):
         if not self.results:
