@@ -1,29 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 HR 资讯自动抓取（仅当天） +（可选）钉钉推送（加签）
-- 覆盖站点（均做真实抓取，支持自定义 URL 列表）：
-  1) 人社部（mohrss.gov.cn）
-  2) 人民网（people.com.cn）
-  3) 光明日报（gmw.cn）
-  4) 北京市人社局（rsj.beijing.gov.cn）
-  5) 新华网（xinhuanet.com）
-  6) 中国人力资源市场网（chrm.mohrss.gov.cn）
-  7) 中国公共招聘网（job.mohrss.gov.cn）
-  8) 中国国家人才网（newjobs.com.cn）
-  9) 三茅人力资源网（hrloo.com）*部分栏目可能需登录
-  10) HRoot（hroot.com）
-  11) 国家税务总局·新闻动态（chinatax.gov.cn）
-  12) 北京市司法部（sfj.beijing.gov.cn）
-  13) 国家社会保险公共服务平台（si.12333.gov.cn）
-  14) 中人网·人力资源频道（chinahrm.cn）
-  15) 中国国家人才网·政策法规（newjobs.com.cn 的政策栏目）
-  16) 北京人力资源服务协会/行业协会（需在环境变量里配置域名/栏目 URL）
-  17) 国家统计局（stats.gov.cn）
-- 仅当天：未能解析到日期的条目在 ONLY_TODAY=1 时会被丢弃
-- 无交互 input；适配 GitHub Actions
-- 允许通过环境变量覆盖各站点抓取入口（逗号分隔 URL）
-
-依赖：requests, beautifulsoup4
+- 覆盖站点（均做真实抓取，支持自定义 URL 列表）
+- 新增：关键词过滤（默认：人力资源, 外包；匹配标题+摘要）
+  * HR_FILTER_KEYWORDS 可覆盖
+  * HR_REQUIRE_ALL=1 时要求全部关键词命中；默认任意命中即可
 """
 
 import os
@@ -53,10 +34,18 @@ TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
 HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "").strip()
 
-# 钉钉（已硬编码，不再依赖环境变量）
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
-DINGTALK_SECRET  = "SEC4d9521a7cf6f96fcf6ea9832116df97b13300441f4e513f487a6502d833def75"
-DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()  # 如果机器人开了“关键词”，可在这里写；否则留空
+# 关键词过滤（新增）
+def _parse_keywords(s: str) -> list[str]:
+    parts = re.split(r"[,\s，；;|]+", s or "")
+    return [p.strip() for p in parts if p.strip()]
+
+HR_REQUIRE_ALL = os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y")
+KEYWORDS = _parse_keywords(os.getenv("HR_FILTER_KEYWORDS", "人力资源,外包"))
+
+# 钉钉（已硬编码，不再依赖环境变量注入 webhook/secret）
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+DINGTALK_SECRET  = "SEC6a9573022b3e890e062c9cb867f9e53d06e3a36ac593e2da06a41522f2448225"
+DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()  # 如机器人开了“关键词”，可在这里写；否则留空
 
 def now_tz():
     return datetime.now(ZoneInfo(TZ_STR))
@@ -85,7 +74,6 @@ def make_session():
     s.mount("http://", adapter)
     s.mount("https://", adapter)
 
-    # 如确有需要走代理，可在 Actions 的 env 里显式设置；默认不主动读取系统代理
     proxies = {}
     if HTTP_PROXY:
         proxies["http"] = HTTP_PROXY
@@ -170,8 +158,7 @@ class HRNewsCrawler:
                     if items:
                         break
                 if not items:
-                    # 兜底：抓页面里所有 a 标签
-                    items = soup.select("a")
+                    items = soup.select("a")  # 兜底
 
                 for node in items:
                     if total >= MAX_PER_SOURCE:
@@ -187,20 +174,21 @@ class HRNewsCrawler:
                     href = a.get("href") or ""
                     full_url = urljoin(base or url, href)
 
-                    # 日期：优先查当前节点/其内 date/time 元素；其次看其文本
+                    # 日期
                     date_text = self._find_date(node) or self._find_date(a)
                     if not date_text:
                         if ONLY_TODAY:
-                            # 只要当天：没有日期的条目丢弃，避免误收
                             continue
-                        # 非当天：可做回退策略，这里我们保持严格，不回填日期
                         continue
 
-                    # 过滤当天
                     if ONLY_TODAY and (not self._is_today(date_text)):
                         continue
 
                     snippet = self._snippet(node)
+
+                    # 关键词过滤（标题+摘要）
+                    if KEYWORDS and (not self._hit_keywords(title, snippet)):
+                        continue
 
                     item = {
                         "title": title,
@@ -217,7 +205,6 @@ class HRNewsCrawler:
 
     # ------------ 站点适配（可用环境变量覆盖入口） ------------
     def crawl_mohrss(self):
-        # 人社部
         urls = as_list("SRC_MOHRSS_URLS", [
             "https://www.mohrss.gov.cn/",
             "https://www.mohrss.gov.cn/SYrlzyhshbzb/zwgk/gzdt/index.html",
@@ -226,15 +213,11 @@ class HRNewsCrawler:
         self.crawl_generic("人社部", "https://www.mohrss.gov.cn", urls)
 
     def crawl_people(self):
-        urls = as_list("SRC_PEOPLE_URLS", [
-            "http://www.people.com.cn/",
-        ])
+        urls = as_list("SRC_PEOPLE_URLS", ["http://www.people.com.cn/"])
         self.crawl_generic("人民网", "http://www.people.com.cn", urls)
 
     def crawl_gmw(self):
-        urls = as_list("SRC_GMW_URLS", [
-            "https://www.gmw.cn/",
-        ])
+        urls = as_list("SRC_GMW_URLS", ["https://www.gmw.cn/"])
         self.crawl_generic("光明日报", "https://www.gmw.cn", urls)
 
     def crawl_beijing_hrss(self):
@@ -246,91 +229,66 @@ class HRNewsCrawler:
         self.crawl_generic("北京人社局", "https://rsj.beijing.gov.cn", urls)
 
     def crawl_xinhua(self):
-        urls = as_list("SRC_XINHUA_URLS", [
-            "https://www.xinhuanet.com/"
-        ])
+        urls = as_list("SRC_XINHUA_URLS", ["https://www.xinhuanet.com/"])
         self.crawl_generic("新华网", "https://www.xinhuanet.com", urls)
 
     def crawl_chrm(self):
-        urls = as_list("SRC_CHRM_URLS", [
-            "https://chrm.mohrss.gov.cn/"
-        ])
+        urls = as_list("SRC_CHRM_URLS", ["https://chrm.mohrss.gov.cn/"])
         self.crawl_generic("中国人力资源市场网", "https://chrm.mohrss.gov.cn", urls)
 
     def crawl_job_mohrss(self):
-        urls = as_list("SRC_JOB_MOHRSS_URLS", [
-            "http://job.mohrss.gov.cn/"
-        ])
+        urls = as_list("SRC_JOB_MOHRSS_URLS", ["http://job.mohrss.gov.cn/"])
         self.crawl_generic("中国公共招聘网", "http://job.mohrss.gov.cn", urls)
 
     def crawl_newjobs(self):
-        urls = as_list("SRC_NEWJOBS_URLS", [
-            "https://www.newjobs.com.cn/"
-        ])
+        urls = as_list("SRC_NEWJOBS_URLS", ["https://www.newjobs.com.cn/"])
         self.crawl_generic("中国国家人才网", "https://www.newjobs.com.cn", urls)
 
     def crawl_hrloo(self):
-        urls = as_list("SRC_HRLOO_URLS", [
-            "https://www.hrloo.com/"
-        ])
+        urls = as_list("SRC_HRLOO_URLS", ["https://www.hrloo.com/"])
         self.crawl_generic("三茅人力资源网", "https://www.hrloo.com", urls)
 
     def crawl_hroot(self):
-        urls = as_list("SRC_HROOT_URLS", [
-            "https://www.hroot.com/"
-        ])
+        urls = as_list("SRC_HROOT_URLS", ["https://www.hroot.com/"])
         self.crawl_generic("HRoot", "https://www.hroot.com", urls)
 
     def crawl_chinatax(self):
-        urls = as_list("SRC_CHINATAX_URLS", [
-            "https://www.chinatax.gov.cn/"
-        ])
+        urls = as_list("SRC_CHINATAX_URLS", ["https://www.chinatax.gov.cn/"])
         self.crawl_generic("国家税务总局", "https://www.chinatax.gov.cn", urls)
 
     def crawl_bjsfj(self):
-        urls = as_list("SRC_BJ_SFJ_URLS", [
-            "https://sfj.beijing.gov.cn/"
-        ])
+        urls = as_list("SRC_BJ_SFJ_URLS", ["https://sfj.beijing.gov.cn/"])
         self.crawl_generic("北京市司法局", "https://sfj.beijing.gov.cn", urls)
 
     def crawl_si_12333(self):
-        urls = as_list("SRC_SI_12333_URLS", [
-            "https://si.12333.gov.cn/"
-        ])
+        urls = as_list("SRC_SI_12333_URLS", ["https://si.12333.gov.cn/"])
         self.crawl_generic("国家社会保险平台", "https://si.12333.gov.cn", urls)
 
     def crawl_chinahrm(self):
-        urls = as_list("SRC_CHINAHRM_URLS", [
-            "https://www.chinahrm.cn/"
-        ])
+        urls = as_list("SRC_CHINAHRM_URLS", ["https://www.chinahrm.cn/"])
         self.crawl_generic("中人网·人力资源频道", "https://www.chinahrm.cn", urls)
 
     def crawl_newjobs_policy(self):
-        urls = as_list("SRC_NEWJOBS_POLICY_URLS", [
-            "https://www.newjobs.com.cn/"
-        ])
+        urls = as_list("SRC_NEWJOBS_POLICY_URLS", ["https://www.newjobs.com.cn/"])
         self.crawl_generic("中国国家人才网·政策法规", "https://www.newjobs.com.cn", urls)
 
     def crawl_bj_hr_associations(self):
-        # 两个协会需要你提供官网/新闻栏目 URL（逗号分隔）
-        urls = as_list("SRC_BJ_HR_ASSOC_URLS", [
-            # 在 Actions 里配置，比如：
-            # "https://www.bhrsa.org.cn/news/", "https://www.bhria.org.cn/notice/"
-        ])
+        urls = as_list("SRC_BJ_HR_ASSOC_URLS", [])
         if urls:
             self.crawl_generic("北京人力资源服务协会（含行业协会）", None, urls)
         else:
             print("ℹ️ 北京 HR 协会未配置 URL（SRC_BJ_HR_ASSOC_URLS），已跳过。")
 
     def crawl_stats(self):
-        urls = as_list("SRC_STATS_URLS", [
-            "https://www.stats.gov.cn/"
-        ])
+        urls = as_list("SRC_STATS_URLS", ["https://www.stats.gov.cn/"])
         self.crawl_generic("国家统计局", "https://www.stats.gov.cn", urls)
 
     # ------------ 主流程 ------------
     def get_today_news(self):
-        print("开始抓取人力资源相关资讯（仅当天）...")
+        print("开始抓取人力资源相关资讯（仅当天，关键词过滤={}，模式={}）...".format(
+            "、".join(KEYWORDS) if KEYWORDS else "（未设置）",
+            "全部命中" if HR_REQUIRE_ALL else "任意命中"
+        ))
         fns = [
             self.crawl_beijing_hrss,
             self.crawl_mohrss,
@@ -383,14 +341,12 @@ class HRNewsCrawler:
             return "内容获取中..."
 
     def _find_date(self, node) -> str:
-        """尽可能从节点找到 YYYY-MM-DD（支持 年/月/日、.、/ 等替换）"""
         if not node:
             return ""
         raw = node.get_text(" ", strip=True)
         raw = raw.replace("年", "-").replace("月", "-").replace("日", "-")
         raw = raw.replace("/", "-").replace(".", "-")
 
-        # 优先查子元素的 datetime/date class
         t = None
         for sel in ["time", ".time", ".date", "span.time", "span.date", "em.time", "em.date", "p.time", "p.date"]:
             sub = node.select_one(sel) if hasattr(node, "select_one") else None
@@ -401,12 +357,10 @@ class HRNewsCrawler:
         if t:
             raw = t.replace("年", "-").replace("月", "-").replace("日", "-").replace("/", "-").replace(".", "-")
 
-        # 完整年月日
         m = re.search(r"(20\d{2}|19\d{2})-(\d{1,2})-(\d{1,2})", raw)
         if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             return f"{y:04d}-{mo:02d}-{d:02d}"
-        # 仅月日（默认今年）
         m2 = re.search(r"\b(\d{1,2})-(\d{1,2})\b", raw)
         if m2:
             y = now_tz().year
@@ -434,6 +388,18 @@ class HRNewsCrawler:
         if not dt:
             return False
         return dt.date() == now_tz().date()
+
+    def _hit_keywords(self, title: str, content: str) -> bool:
+        """标题+摘要 命中关键词"""
+        if not KEYWORDS:
+            return True
+        hay = (title or "") + " " + (content or "")
+        # 不区分大小写
+        hay_low = hay.lower()
+        kws_low = [k.lower() for k in KEYWORDS]
+        if HR_REQUIRE_ALL:
+            return all(k in hay_low for k in kws_low)
+        return any(k in hay_low for k in kws_low)
 
     # ------------ 输出 ------------
     def save_results(self):
