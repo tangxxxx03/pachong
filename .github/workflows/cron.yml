@@ -2,7 +2,7 @@ name: run-pachong-outsourcing
 
 on:
   schedule:
-    - cron: "35 0 * * 1-5"   # 北京 08:35（UTC 00:35）错峰
+    - cron: "35 0 * * 1-5"     # 北京 08:35（UTC 00:35），错峰更稳
   workflow_dispatch: {}
 
 concurrency:
@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 安装 Chrome（关键，避免 runner 变更导致无浏览器）
+      # 安装 Chrome（关键）
       - uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
@@ -44,7 +44,7 @@ jobs:
 
       - name: Run pachong
         env:
-          # 强制关闭任何代理，避免把 localhost 握手走代理
+          # 彻底关闭任何代理，避免把 Selenium 本地握手走代理
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
@@ -54,5 +54,6 @@ jobs:
           NO_PROXY: "localhost,127.0.0.1,::1"
           HEADLESS: "1"
           KEYWORDS: "外包,派遣"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-        run: python main.py
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}   # Settings → Secrets 里配置
+        run: |
+          python main.py
