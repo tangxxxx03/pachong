@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 安装 Chrome（Selenium 需要）
+      # 安装 Google Chrome（关键，避免“昨天有、今天没”的波动）
       - uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
@@ -39,12 +39,12 @@ jobs:
       - name: Debug event & time
         run: |
           echo "event=${{ github.event_name }}"
-          echo "UTC now:" && date -u
-          echo "Beijing now:" && TZ=Asia/Shanghai date
+          echo "UTC:" && date -u
+          echo "Beijing:" && TZ=Asia/Shanghai date
 
       - name: Run pachong
-        # 关键：强制关闭任何代理变量，避免连到 localhost:xxxx
         env:
+          # 强制关闭任何代理，避免把 localhost 握手走代理
           http_proxy: ""
           https_proxy: ""
           HTTP_PROXY: ""
@@ -54,6 +54,5 @@ jobs:
           NO_PROXY: "localhost,127.0.0.1,::1"
           HEADLESS: "1"
           KEYWORDS: "外包,派遣"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }} # 在仓库 Secrets 填好
-        run: |
-          python main.py
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}   # ← 仓库Secrets里配置
+        run: python main.py
