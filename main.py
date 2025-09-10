@@ -11,36 +11,50 @@
 import os, re, time, math
 from datetime import datetime, timedelta
 import pandas as pd
-import requests
 import pdfplumber
 from io import BytesIO
 from urllib.parse import urlparse, urljoin
 
+# —— HTTP 会话：禁用环境代理 + 重试，更稳 —— #
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# 彻底清除任何代理环境变量，避免在 CI 中把本地代理带过去
+for _k in ('http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'):
+    os.environ.pop(_k, None)
+
+_SESSION = requests.Session()
+_SESSION.trust_env = False  # 忽略环境里的代理设置
+_retry = Retry(
+    total=4, backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=frozenset(["GET", "POST"])
+)
+_SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
+_SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+})
+
+# Selenium
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 
 # ================= 配置区（可用环境变量覆盖） =================
-# 从环境变量读取，留一个备选（开发本地可临时写死，但不建议）
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()
-if not DINGTALK_WEBHOOK:
-    # 如需本地单机调试，可临时把下面这行注释去掉并填上；CI 不要写死！
-    # DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=xxxx"
-    pass
-
-KEYWORDS = os.getenv("KEYWORDS", "外包,派遣").split(",")  # 可通过 env 覆盖
+KEYWORDS = os.getenv("KEYWORDS", "外包,派遣").split(",")
 KEYWORDS = [k.strip() for k in KEYWORDS if k.strip()]
 
-# 各站点开关
 CRAWL_BEIJING = os.getenv("CRAWL_BEIJING", "true").lower() in ("1","true","yes","y")
 CRAWL_ZSXTZB  = os.getenv("CRAWL_ZSXTZB",  "true").lower() in ("1","true","yes","y")
 
-# 截止期过滤（显示 + 过滤）
-DUE_FILTER_DAYS = int(os.getenv("DUE_FILTER_DAYS", "30"))  # 仅保留未来 N 天内截止的标；0 表示不限制
+DUE_FILTER_DAYS = int(os.getenv("DUE_FILTER_DAYS", "30"))
 SKIP_EXPIRED = os.getenv("SKIP_EXPIRED", "true").lower() in ("1","true","yes","y")
-
-# 是否无头运行（CI 建议 1）
 HEADLESS = os.getenv("HEADLESS", "1").lower() in ("1","true","yes","y")
-
 # ===========================================================
 
 def send_to_dingtalk_markdown(title: str, md_text: str, webhook: str = None):
@@ -50,7 +64,7 @@ def send_to_dingtalk_markdown(title: str, md_text: str, webhook: str = None):
     headers = {"Content-Type": "application/json"}
     data = {"msgtype": "markdown", "markdown": {"title": title, "text": md_text}}
     try:
-        resp = requests.post(webhook, json=data, headers=headers, timeout=15)
+        resp = _SESSION.post(webhook, json=data, headers=headers, timeout=15)
         print("钉钉推送：", resp.status_code, resp.text[:180])
     except Exception as e:
         print("? 发送钉钉失败：", e)
@@ -116,9 +130,7 @@ def _to_datetime(s: str):
     return None
 
 def extract_deadline(detail_text: str) -> str:
-    """
-    从正文识别：投标/递交/响应/报价/报名 截止（优先）→ 开标时间（兜底）
-    """
+    """从正文识别：投标/递交/响应/报价/报名 截止（优先）→ 开标时间（兜底）"""
     txt = _safe_text(detail_text)
     pats = [
         r"(?:投标(?:文件)?|递交(?:响应)?文件|响应文件提交|报价|报名)\s*截止(?:时间|日期)\s*[:：]?\s*([^\n\r，。;；]{6,40})",
@@ -140,7 +152,7 @@ def fetch_pdf_text(url: str, referer: str = None, timeout=20) -> str:
     try:
         headers = {"User-Agent":"Mozilla/5.0"}
         if referer: headers["Referer"] = referer
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = _SESSION.get(url, headers=headers, timeout=timeout)
         ct = (r.headers.get("Content-Type") or "").lower()
         if "pdf" not in ct and not url.lower().endswith(".pdf"):
             return ""
@@ -157,10 +169,7 @@ def fetch_pdf_text(url: str, referer: str = None, timeout=20) -> str:
         return ""
 
 def extract_detail_text_with_pdf_fallback(driver, page_html: str, page_url: str):
-    """
-    尝试取正文；若页面为 PDF 或正文里只有“下载附件/查看PDF”，则抓取页面上的 PDF 链接并解析文本
-    """
-    # 1) 直接抓正文容器
+    """尝试取正文；若为 PDF 或仅附件，则抓取页面上的 PDF 并解析"""
     xps = ["//*[@id='zoom']","//*[@id='vsb_content']","//*[@class='content']",
            "//*[@class='article']","//*[@id='info']","//*[@class='detail']",
            "//*[@id='xxnr']","//*[@class='cont']"]
@@ -171,8 +180,6 @@ def extract_detail_text_with_pdf_fallback(driver, page_html: str, page_url: str)
                 return t
         except Exception:
             pass
-
-    # 2) 页面为 PDF 或只提供附件的情况
     try:
         links = re.findall(r'href=["\'](.*?)["\']', page_html, flags=re.I)
         pdfs = []
@@ -197,8 +204,6 @@ def extract_detail_text_with_pdf_fallback(driver, page_html: str, page_url: str)
                     return pdf_text
     except Exception:
         pass
-
-    # 3) 兜底：整页文本
     try:
         return driver.find_element(By.TAG_NAME, "body").text
     except Exception:
@@ -329,20 +334,30 @@ def parse_award_fields(detail_html: str, detail_text: str, current_url: str = ""
     data["中标日期"] = award_date if award_date else "暂无"
     return data
 
-# -------- Selenium --------
+# -------- Selenium：容器友好构造 --------
 def _build_driver():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-gpu")
+    opts = Options()
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")  # 容器内共享内存小，必须加
+    opts.add_argument("--disable-gpu")
     if HEADLESS:
-        options.add_argument("--headless=new")
-    # Selenium 4.6+ 自动管理驱动；配合 actions/setup-chrome 使用
-    driver = webdriver.Chrome(options=options)
+        opts.add_argument("--headless=new")
+
+    # 优先使用 Selenium Manager；失败再用 webdriver-manager 兜底
+    try:
+        driver = webdriver.Chrome(options=opts)
+    except Exception:
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()),
+                                  options=opts)
+
     driver.implicitly_wait(5)
+    driver.set_page_load_timeout(45)
+    driver.set_script_timeout(45)
     return driver
 
-# -------- 站点一：北京公共资源交易平台（关键词搜索页） --------
+# -------- 站点一：北京公共资源交易平台 --------
 def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
     driver = _build_driver()
     all_bidding, all_award, seen_links = [], [], set()
