@@ -14,14 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # ✅ 统一的环境变量（每个键只出现一次）
+    # ✅ 统一 env（每个键只出现一次）
     env:
-      http_proxy: ""
-      https_proxy: ""
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
       ALL_PROXY: ""
-      all_proxy: ""
       NO_PROXY: "localhost,127.0.0.1,::1"
       HEADLESS: "1"
       KEYWORDS: "外包,派遣"
