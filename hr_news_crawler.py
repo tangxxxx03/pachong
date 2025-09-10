@@ -13,7 +13,7 @@ HR 资讯自动抓取（仅当天） +（可选）钉钉推送（加签）
   9) 三茅人力资源网（hrloo.com）*部分栏目可能需登录
   10) HRoot（hroot.com）
   11) 国家税务总局·新闻动态（chinatax.gov.cn）
-  12) 北京市司法局（sfj.beijing.gov.cn）
+  12) 北京市司法部（sfj.beijing.gov.cn）
   13) 国家社会保险公共服务平台（si.12333.gov.cn）
   14) 中人网·人力资源频道（chinahrm.cn）
   15) 中国国家人才网·政策法规（newjobs.com.cn 的政策栏目）
@@ -53,10 +53,10 @@ TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
 HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "").strip()
 
-# 钉钉
-DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOKHR", "").strip()
-DINGTALK_SECRET = os.getenv("DINGTALK_SECRET_HR", "").strip()
-DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()
+# 钉钉（已硬编码，不再依赖环境变量）
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
+DINGTALK_SECRET  = "SEC4d9521a7cf6f96fcf6ea9832116df97b13300441f4e513f487a6502d833def75"
+DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()  # 如果机器人开了“关键词”，可在这里写；否则留空
 
 def now_tz():
     return datetime.now(ZoneInfo(TZ_STR))
@@ -65,6 +65,7 @@ def now_tz():
 
 def make_session():
     s = requests.Session()
+    s.trust_env = False  # 避免继承 Runner 的 http_proxy/https_proxy 等
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -84,6 +85,7 @@ def make_session():
     s.mount("http://", adapter)
     s.mount("https://", adapter)
 
+    # 如确有需要走代理，可在 Actions 的 env 里显式设置；默认不主动读取系统代理
     proxies = {}
     if HTTP_PROXY:
         proxies["http"] = HTTP_PROXY
@@ -504,7 +506,7 @@ def main():
     # 保存
     crawler.save_results()
 
-    #（可选）推送钉钉
+    # 推送钉钉
     md = crawler.to_markdown()
     ok = send_dingtalk_markdown("人力资源资讯（当天）", md)
     print("钉钉推送：", "成功 ✅" if ok else "未推送/失败 ❌")
