@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 People.cn 站内搜索（仅当天 + 翻页）→ 自动推送钉钉（加签）
+修复点：
+- 更稳的结果区选择器
+- 向上/邻近节点回溯提取日期
+- 更宽松的日期识别
+- 不再因为第一页 0 条就提前退出
 
-- 关键词默认：外包（--keyword 可改）
-- 翻页默认：1 页（--pages 可改；遵守 robots 建议 120s/次，翻多页会慢）
-- 仅当天（Asia/Shanghai）
-- 发送钉钉：硬编码 webhook/secret（你提供的那组）
-
-依赖：requests, beautifulsoup4, urllib3
 用法：
   python people_search_today.py --keyword 外包 --pages 1 --delay 120
 """
-
 import re
 import time
 import csv
@@ -28,7 +26,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import hmac, hashlib, base64, urllib.parse
 
-# ============ 钉钉机器人（已硬编码） ============
+# ====== 钉钉（硬编码）======
 DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
 DINGTALK_SECRET  = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
@@ -51,7 +49,7 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
         print("DingTalk error:", e)
         return False
 
-# ============ HTTP 会话 ============
+# ====== HTTP 会话 ======
 def make_session():
     s = requests.Session()
     s.trust_env = False
@@ -67,6 +65,25 @@ def make_session():
     s.mount("http://", adapter); s.mount("https://", adapter)
     return s
 
+# ====== 工具 ======
+DATE_PATTERNS = [
+    r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\s+\d{2}:\d{2}:\d{2}",
+    r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
+    r"(20\d{2})年(\d{1,2})月(\d{1,2})日",
+]
+
+def find_date_in_text(text: str) -> str:
+    t = text.replace("\u3000", " ")
+    for pat in DATE_PATTERNS:
+        m = re.search(pat, t)
+        if m:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return f"{y:04d}-{mo:02d}-{d:02d}"
+    return ""
+
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
 class PeopleSearch:
     def __init__(self, keyword="外包", max_pages=1, delay=120, tz="Asia/Shanghai"):
         self.keyword = keyword
@@ -74,7 +91,6 @@ class PeopleSearch:
         self.tz = ZoneInfo(tz)
         self.today = datetime.now(self.tz).strftime("%Y-%m-%d")
         self.session = make_session()
-        # people 域名按 robots 节流
         self._next_allowed_time = defaultdict(float)
         self._domain_delay = {
             "search.people.cn": delay,
@@ -105,18 +121,27 @@ class PeopleSearch:
             return False
         self._seen.add(key); self.results.append(item); return True
 
-    @staticmethod
-    def _extract_date(text: str) -> str:
-        m = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\s+\d{2}:\d{2}:\d{2}", text)
-        if m:
-            return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-        m2 = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", text)
-        if m2:
-            return f"{int(m2.group(1)):04d}-{int(m2.group(2)):02d}-{int(m2.group(3)):02d}"
-        return ""
+    # ——从标题 a 出发，向上回溯几层并检查兄弟节点，尽可能找“来源/日期”行
+    def _locate_block_and_date(self, a_tag):
+        # 1) 先看 a_tag 自身和父节点
+        for up in [a_tag, a_tag.parent, getattr(a_tag.parent, "parent", None),
+                   getattr(getattr(a_tag, "parent", None), "parent", None)]:
+            if not up: continue
+            txt = up.get_text(" ", strip=True)
+            d = find_date_in_text(txt)
+            if d: return up, d
+            # 再看兄弟
+            for sib in list(up.previous_siblings)[:3] + list(up.next_siblings)[:3]:
+                try:
+                    if not hasattr(sib, "get_text"): continue
+                    d2 = find_date_in_text(sib.get_text(" ", strip=True))
+                    if d2: return up, d2
+                except Exception:
+                    pass
+        return a_tag, ""
 
     def run(self):
-        print(f"开始抓取：关键词='{self.keyword}'，仅当天={self.today}，最多 {self.max_pages} 页")
+        print(f"开始抓取：关键词='{self.keyword}'，仅当天={self.today}，最多 {self.max_pages} 页（注意 people 需延迟）")
         added_total = 0
         for page in range(1, self.max_pages + 1):
             url = self._build_url(page)
@@ -125,43 +150,45 @@ class PeopleSearch:
                 resp.encoding = resp.apparent_encoding or "utf-8"
                 if resp.status_code != 200:
                     print(f"⚠️ 第{page}页访问失败 {resp.status_code}: {url}")
-                    break
+                    continue
 
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                candidates = []
-                for css in [
-                    "div.content div[class*='news']",
-                    "div.content div[class*='result']",
-                    "div.content div",
-                    "div.search div",
-                    "div.article div"
+                # 更精准：结果区一般在 .content 或 .search 容器下
+                result_root = None
+                for sel in ["div.content", "div.search", "div.main-container", "div.module-common"]:
+                    result_root = soup.select_one(sel)
+                    if result_root: break
+                scan_scope = result_root or soup
+
+                # 结果条目：a 标签（排除导航/翻页）
+                anchors = []
+                for sel in [
+                    "div.content a",
+                    "div.search a",
+                    "a"
                 ]:
-                    candidates = soup.select(css)
-                    if candidates: break
-                if not candidates:
-                    candidates = soup.select("div")
+                    anchors = scan_scope.select(sel)
+                    if anchors: break
 
                 added_page = 0
-                for node in candidates:
-                    a = node.find("a", href=True)
-                    if not a: continue
-                    title = re.sub(r"\s+", " ", a.get_text(strip=True))
-                    if not title: continue
-                    href = a["href"].strip()
+                for a in anchors:
+                    href = a.get("href") or ""
+                    title = norm(a.get_text())
+                    if not href or not title: continue
+                    # 过滤明显的无效链接（翻页锚点、javascript 等）
+                    if href.startswith("#") or href.startswith("javascript"): 
+                        continue
                     full_url = urljoin(url, href)
 
-                    raw = node.get_text(" ", strip=True)
-                    d = self._extract_date(raw)
+                    block, d = self._locate_block_and_date(a)
                     if d != self.today:
-                        continue
+                        continue  # 只要当天
 
-                    p = node.find("p")
-                    digest = ""
-                    if p:
-                        digest = re.sub(r"\s+", " ", p.get_text(" ", strip=True))
-                    if not digest:
-                        digest = re.sub(r"\s+", " ", raw)[:160]
+                    # 摘要：优先找块内的 p；没有就取块文本
+                    p = block.find("p") if hasattr(block, "find") else None
+                    digest = norm(p.get_text(" ", strip=True)) if p else norm(block.get_text(" ", strip=True))
+                    digest = digest[:160]
 
                     item = {
                         "title": title,
@@ -175,13 +202,15 @@ class PeopleSearch:
                         print(f" + {title} | {d}")
 
                 added_total += added_page
-                if page == 1 and added_page == 0:
-                    print("第一页未找到当天结果，提前结束。")
-                    break
+                print(f"第{page}页：当天命中 {added_page} 条。")
+
+                # 不再因为第一页 0 条就提前退出；如果你想快些，可放开以下逻辑：
+                # if page == 1 and added_page == 0:
+                #     break
 
             except Exception as e:
                 print(f"⚠️ 抓取异常 page={page}: {e}")
-                break
+                continue
 
         print(f"完成：共抓到 {added_total} 条当天结果。")
         return self.results
