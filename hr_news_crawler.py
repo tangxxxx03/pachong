@@ -3,7 +3,7 @@
 HR 资讯自动抓取（仅当天） +（可选）钉钉推送（加签）
 - 覆盖站点（均做真实抓取，支持自定义 URL 列表）
 - 新增：关键词过滤（默认：人力资源, 外包；匹配标题+摘要）
-  * HR_FILTER_KEYWORDS 可覆盖
+  * HR_FILTER_KEYWORDS 环境变量可覆盖
   * HR_REQUIRE_ALL=1 时要求全部关键词命中；默认任意命中即可
 """
 
@@ -24,6 +24,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+import ssl
 
 # ====================== 环境变量配置 ======================
 
@@ -34,7 +35,7 @@ TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
 HTTP_PROXY = os.getenv("HTTP_PROXY", "").strip()
 HTTPS_PROXY = os.getenv("HTTPS_PROXY", "").strip()
 
-# 关键词过滤（新增）
+# 关键词过滤
 def _parse_keywords(s: str) -> list[str]:
     parts = re.split(r"[,\s，；;|]+", s or "")
     return [p.strip() for p in parts if p.strip()]
@@ -42,15 +43,26 @@ def _parse_keywords(s: str) -> list[str]:
 HR_REQUIRE_ALL = os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y")
 KEYWORDS = _parse_keywords(os.getenv("HR_FILTER_KEYWORDS", "人力资源,外包"))
 
-# 钉钉（已硬编码，不再依赖环境变量注入 webhook/secret）
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
-DINGTALK_SECRET  = "SEC6a9573022b3e890e062c9cb867f9e53d06e3a36ac593e2da06a41522f2448225"
-DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()  # 如机器人开了“关键词”，可在这里写；否则留空
+# —— 钉钉（改为环境变量，不再硬编码）——
+# DINGTALK_BASE: 形如 https://oapi.dingtalk.com/robot/send?access_token=XXXX
+# DINGTALK_SECRET: 机器人“加签”的 SEC 开头密钥；若留空则视为未开启加签
+DINGTALK_BASE   = os.getenv("DINGTALK_BASE", "").strip()
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "").strip()
+DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD_HR", "").strip()  # 关键词触发（如机器人设置了“关键词”）
 
 def now_tz():
     return datetime.now(ZoneInfo(TZ_STR))
 
-# ====================== HTTP 会话（重试/超时） ======================
+# ====================== HTTP 会话（重试/超时/TLS 兼容） ======================
+
+class LegacyTLSAdapter(HTTPAdapter):
+    """为旧站点开启 legacy TLS 服务器兼容（解决 UNSAFE_LEGACY_RENEGOTIATION_DISABLED）"""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
+            ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 def make_session():
     s = requests.Session()
@@ -60,7 +72,8 @@ def make_session():
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
     s.headers.update(headers)
 
@@ -71,8 +84,9 @@ def make_session():
         allowed_methods=["GET", "POST"]
     )
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=12)
+    legacy = LegacyTLSAdapter(max_retries=retries, pool_connections=10, pool_maxsize=12)
     s.mount("http://", adapter)
-    s.mount("https://", adapter)
+    s.mount("https://", legacy)  # 关键：启用旧式 TLS 兼容
 
     proxies = {}
     if HTTP_PROXY:
@@ -86,28 +100,35 @@ def make_session():
 
 # ====================== 钉钉发送（加签） ======================
 
-def _sign_webhook(base_webhook: str, secret: str) -> str:
+def _build_dingtalk_url(base_webhook: str, secret: str) -> str:
+    if not base_webhook:
+        return ""
     if not secret:
         return base_webhook
-    ts = str(round(time.time() * 1000))
+    ts = str(int(time.time() * 1000))
     string_to_sign = f"{ts}\n{secret}".encode("utf-8")
-    hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign, digestmod=hashlib.sha256).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-    return f"{base_webhook}&timestamp={ts}&sign={sign}"
+    sign_bytes = hmac.new(secret.encode("utf-8"), string_to_sign, digestmod=hashlib.sha256).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(sign_bytes))
+    sep = "&" if "?" in base_webhook else "?"
+    return f"{base_webhook}{sep}timestamp={ts}&sign={sign}"
 
 def send_dingtalk_markdown(title: str, md_text: str) -> bool:
-    if not DINGTALK_WEBHOOK or not DINGTALK_SECRET:
-        print("🔕 未配置钉钉 WEBHOOK/SECRET，跳过推送。")
+    # 未配置则直接跳过
+    if not DINGTALK_BASE:
+        print("🔕 未配置 DINGTALK_BASE，跳过推送。")
         return False
 
-    webhook = _sign_webhook(DINGTALK_WEBHOOK, DINGTALK_SECRET)
+    webhook = _build_dingtalk_url(DINGTALK_BASE, DINGTALK_SECRET)
+
+    # 机器人启用了“关键词”时，确保标题里带上
     if DINGTALK_KEYWORD and (DINGTALK_KEYWORD not in title and DINGTALK_KEYWORD not in md_text):
         title = f"{DINGTALK_KEYWORD} | {title}"
 
     payload = {"msgtype": "markdown", "markdown": {"title": title, "text": md_text}}
     try:
         r = requests.post(webhook, json=payload, timeout=20)
-        print("HR DingTalk resp:", r.status_code, r.text[:300])
+        text_preview = (r.text[:300] + "...") if len(r.text) > 300 else r.text
+        print("HR DingTalk resp:", r.status_code, text_preview)
         ok = (r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("errcode") == 0)
         return ok
     except Exception as e:
@@ -145,8 +166,9 @@ class HRNewsCrawler:
             if total >= MAX_PER_SOURCE:
                 break
             try:
-                resp = self.session.get(url, timeout=15)
-                resp.encoding = resp.apparent_encoding or "utf-8"
+                resp = self.session.get(url, timeout=(6.1, 20))
+                # 更稳的编码判定
+                resp.encoding = resp.apparent_encoding or resp.encoding or "utf-8"
                 if resp.status_code != 200:
                     print(f"⚠️ {source_name} 访问失败 {resp.status_code}: {url}")
                     continue
@@ -257,7 +279,10 @@ class HRNewsCrawler:
         self.crawl_generic("国家税务总局", "https://www.chinatax.gov.cn", urls)
 
     def crawl_bjsfj(self):
-        urls = as_list("SRC_BJ_SFJ_URLS", ["https://sfj.beijing.gov.cn/"])
+        urls = as_list("SRC_BJ_SFJ_URLS", [
+            "https://sfj.beijing.gov.cn/",
+            "https://sfj.beijing.gov.cn/zwgk/",  # 备选
+        ])
         self.crawl_generic("北京市司法局", "https://sfj.beijing.gov.cn", urls)
 
     def crawl_si_12333(self):
@@ -341,27 +366,38 @@ class HRNewsCrawler:
             return "内容获取中..."
 
     def _find_date(self, node) -> str:
+        """尽最大努力从节点/其子节点里抽出日期，含相对时间（今天/小时前/分钟前/刚刚）。"""
         if not node:
             return ""
         raw = node.get_text(" ", strip=True)
-        raw = raw.replace("年", "-").replace("月", "-").replace("日", "-")
-        raw = raw.replace("/", "-").replace(".", "-")
+
+        # 相对时间 => 视作当天
+        if re.search(r"(刚刚|分钟|小时前|今日|今天)", raw):
+            return now_tz().strftime("%Y-%m-%d")
+        m_rel = re.search(r"(\d+)\s*(分钟|小时)前", raw)
+        if m_rel:
+            return now_tz().strftime("%Y-%m-%d")
+        m_today_hm = re.search(r"今天\s*\d{1,2}:\d{1,2}", raw)
+        if m_today_hm:
+            return now_tz().strftime("%Y-%m-%d")
+
+        norm = raw.replace("年", "-").replace("月", "-").replace("日", "-").replace("/", "-").replace(".", "-")
 
         t = None
         for sel in ["time", ".time", ".date", "span.time", "span.date", "em.time", "em.date", "p.time", "p.date"]:
             sub = node.select_one(sel) if hasattr(node, "select_one") else None
             if sub:
-                t = sub.get("datetime") or sub.get_text(strip=True)
+                t = (sub.get("datetime") or sub.get_text(strip=True) or "").strip()
                 if t:
                     break
         if t:
-            raw = t.replace("年", "-").replace("月", "-").replace("日", "-").replace("/", "-").replace(".", "-")
+            norm = t.replace("年", "-").replace("月", "-").replace("日", "-").replace("/", "-").replace(".", "-")
 
-        m = re.search(r"(20\d{2}|19\d{2})-(\d{1,2})-(\d{1,2})", raw)
+        m = re.search(r"(20\d{2}|19\d{2})-(\d{1,2})-(\d{1,2})", norm)
         if m:
             y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
             return f"{y:04d}-{mo:02d}-{d:02d}"
-        m2 = re.search(r"\b(\d{1,2})-(\d{1,2})\b", raw)
+        m2 = re.search(r"\b(\d{1,2})-(\d{1,2})\b", norm)
         if m2:
             y = now_tz().year
             return f"{y:04d}-{int(m2.group(1)):02d}-{int(m2.group(2)):02d}"
@@ -394,7 +430,6 @@ class HRNewsCrawler:
         if not KEYWORDS:
             return True
         hay = (title or "") + " " + (content or "")
-        # 不区分大小写
         hay_low = hay.lower()
         kws_low = [k.lower() for k in KEYWORDS]
         if HR_REQUIRE_ALL:
@@ -472,10 +507,13 @@ def main():
     # 保存
     crawler.save_results()
 
-    # 推送钉钉
-    md = crawler.to_markdown()
-    ok = send_dingtalk_markdown("人力资源资讯（当天）", md)
-    print("钉钉推送：", "成功 ✅" if ok else "未推送/失败 ❌")
+    # 推送钉钉（无结果则不推送，避免无意义调用）
+    if crawler.results:
+        md = crawler.to_markdown()
+        ok = send_dingtalk_markdown("人力资源资讯（当天）", md)
+        print("钉钉推送：", "成功 ✅" if ok else "未推送/失败 ❌")
+    else:
+        print("钉钉推送：无数据，已跳过。")
 
 if __name__ == "__main__":
     main()
