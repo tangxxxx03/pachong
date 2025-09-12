@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-People.cn 站内搜索（最近N小时 + 多关键词 + 翻页）→ 自动推送钉钉（加签）
+People.cn 站内搜索（最近N小时 + 单关键词顺序抓取）→ 每个关键词单独保存 & 单独推送钉钉
 - 直连接口：http://search.people.cn/search-platform/front/search（POST）
-- 支持多关键词（并集）：--keywords "外包,派遣,人力资源"（逗号/空格/竖线均可分隔）
-- 通过 startTime / endTime 定义“滚动时间窗”（默认：最近24小时，Asia/Shanghai）
-- 接口优先；失败降级到 HTML 解析；自动去重（按 URL）
-- Markdown 输出显示命中关键词标签；CSV/JSON 增加 kw 字段
+- 时间窗：--window-hours / --since / --until（默认：最近24小时，Asia/Shanghai）
+- 顺序抓取：--keywords "外包,人力资源,派遣"（每个关键词独立运行、独立产物、独立钉钉）
+- 接口优先；失败降级到 HTML 解析；域名级节流（默认120s）；自动去重（按URL）
+- 文件名包含关键词，Markdown 标题也包含关键词，便于分开查看
+
 用法示例：
-  python people_search_today.py --keywords "外包,人力资源" --window-hours 24
+  python people_seq.py --keywords "外包,人力资源,派遣" --pages 2 --window-hours 24
+  # 也可只抓一个关键词：
+  python people_seq.py --keyword 外包 --pages 2
 """
 
 import re
@@ -19,7 +22,7 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
-from urllib.parse import urlencode, urljoin, urlparse, quote_plus
+from urllib.parse import urljoin, urlparse, quote_plus
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -117,6 +120,7 @@ def find_date_in_text(text: str) -> str:
 
 
 def parse_local_dt(s: str, tz: ZoneInfo) -> datetime:
+    """'YYYY-MM-DD HH:MM' / 'YYYY-MM-DDTHH:MM' / 'YYYY-MM-DD'"""
     s = (s or "").strip()
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
@@ -130,12 +134,29 @@ def parse_local_dt(s: str, tz: ZoneInfo) -> datetime:
 
 
 def parse_keywords_arg(args) -> list:
-    """解析 --keywords 或 --keyword 到列表；分隔符支持 逗号/空格/竖线"""
+    """--keywords 或 --keyword，分隔符：逗号/空格/竖线；去重保序"""
     if args.keywords:
         parts = re.split(r"[,\s|]+", args.keywords.strip())
         kws = [p for p in (x.strip() for x in parts) if p]
-        return list(dict.fromkeys(kws))  # 去重保序
+        return list(dict.fromkeys(kws))
     return [args.keyword]
+
+
+def slugify_kw(kw: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fa5]+", "_", kw).strip("_") or "kw"
+
+
+def days_between(start_dt: datetime, end_dt: datetime) -> set:
+    days = set()
+    d = start_dt.date()
+    last = end_dt.date()
+    # 限制最多跨7天以防误配置
+    for _ in range(8):
+        days.add(d.strftime("%Y-%m-%d"))
+        if d == last:
+            break
+        d = d + timedelta(days=1)
+    return days
 
 
 class PeopleSearch:
@@ -144,10 +165,11 @@ class PeopleSearch:
         "http://search.people.cn/api-search/front/search",
     ]
 
-    def __init__(self, keywords, max_pages=1, delay=120,
-                 tz="Asia/Shanghai", start_ms: int = None, end_ms: int = None):
-        self.keywords = keywords  # 列表
+    def __init__(self, keyword="外包", max_pages=1, delay=120,
+                 tz="Asia/Shanghai", start_ms: int = None, end_ms: int = None, page_limit=20):
+        self.keyword = keyword
         self.max_pages = max_pages
+        self.page_limit = max(1, min(50, int(page_limit)))
         self.tz = ZoneInfo(tz)
 
         # —— 时间窗（毫秒）——
@@ -156,8 +178,7 @@ class PeopleSearch:
             self.start_ms = int((now - timedelta(hours=24)).timestamp() * 1000)
             self.end_ms = int(now.timestamp() * 1000)
         else:
-            self.start_ms = int(start_ms)
-            self.end_ms = int(end_ms)
+            self.start_ms = int(start_ms); self.end_ms = int(end_ms)
         self.start_dt = datetime.fromtimestamp(self.start_ms / 1000, self.tz)
         self.end_dt = datetime.fromtimestamp(self.end_ms / 1000, self.tz)
 
@@ -193,11 +214,11 @@ class PeopleSearch:
         return self.session.get(url, **kwargs)
 
     # —— 通过接口抓取一页 —— #
-    def _search_api_page(self, api_url: str, page: int, kw: str):
+    def _search_api_page(self, api_url: str, page: int):
         payload = {
-            "key": kw,
+            "key": self.keyword,
             "page": page,
-            "limit": 20,
+            "limit": self.page_limit,
             "hasTitle": True,
             "hasContent": True,
             "isFuzzy": True,
@@ -209,16 +230,16 @@ class PeopleSearch:
         headers = {
             "Content-Type": "application/json;charset=UTF-8",
             "Origin": "http://search.people.cn",
-            "Referer": f"http://search.people.cn/s/?keyword={quote_plus(kw)}&page={page}",
+            "Referer": f"http://search.people.cn/s/?keyword={quote_plus(self.keyword)}&page={page}",
         }
         try:
             r = self._post_with_throttle(api_url, json=payload, headers=headers, timeout=25)
             if r.status_code != 200:
-                print(f"  API {api_url} [{kw}] 第{page}页 HTTP {r.status_code}")
+                print(f"  API {api_url} 第{page}页 HTTP {r.status_code}")
                 return []
             j = r.json()
         except Exception as e:
-            print(f"  API {api_url} [{kw}] 第{page}页解析异常：{e}")
+            print(f"  API {api_url} 第{page}页解析异常：{e}")
             return []
 
         data = j.get("data") or j
@@ -243,13 +264,12 @@ class PeopleSearch:
                 "date": dt_str[:10],
                 "datetime": dt_str,
                 "content": digest[:160],
-                "kw": kw,
             })
         return out
 
     # —— HTML 兜底（窗口内自然日）—— #
-    def _fallback_html_page(self, page: int, kw: str):
-        url = f"https://search.people.cn/s/?keyword={quote_plus(kw)}&page={page}"
+    def _fallback_html_page(self, page: int):
+        url = f"https://search.people.cn/s/?keyword={quote_plus(self.keyword)}&page={page}"
         try:
             resp = self._get_with_throttle(url, timeout=25)
             resp.encoding = resp.apparent_encoding or "utf-8"
@@ -270,8 +290,7 @@ class PeopleSearch:
                 if nodes:
                     break
 
-            days = {datetime.fromtimestamp(self.start_ms/1000, self.tz).strftime("%Y-%m-%d"),
-                    datetime.fromtimestamp(self.end_ms/1000, self.tz).strftime("%Y-%m-%d")}
+            days = days_between(self.start_dt, self.end_dt)
 
             out = []
             for li in nodes:
@@ -303,11 +322,10 @@ class PeopleSearch:
                     "date": d,
                     "datetime": d + " 00:00",
                     "content": digest[:160],
-                    "kw": kw,
                 })
             return out
         except Exception as e:
-            print(f"  HTML 兜底异常 [{kw}] page={page}: {e}")
+            print(f"  HTML 兜底异常 page={page}: {e}")
             return []
 
     def _push_if_new(self, item):
@@ -320,31 +338,29 @@ class PeopleSearch:
 
     def run(self):
         rng = f"{self.start_dt.strftime('%Y-%m-%d %H:%M')} ~ {self.end_dt.strftime('%Y-%m-%d %H:%M')}"
-        print(f"开始抓取（接口优先）：关键词组={self.keywords}，时间窗=[{rng}]，最多 {self.max_pages} 页/关键词")
+        print(f"\n=== 关键词：{self.keyword} | 时间窗：[{rng}] | 最多 {self.max_pages} 页 ===")
         added_total = 0
 
-        for kw in self.keywords:
-            print(f"\n=== 关键词：{kw} ===")
-            for page in range(1, self.max_pages + 1):
-                added_page = 0
-                page_items = []
-                for api in self.API_URLS:
-                    items = self._search_api_page(api, page, kw)
-                    if items:
-                        page_items = items
-                        break
-                if not page_items:
-                    page_items = self._fallback_html_page(page, kw)
+        for page in range(1, self.max_pages + 1):
+            added_page = 0
+            page_items = []
+            for api in self.API_URLS:
+                items = self._search_api_page(api, page)
+                if items:
+                    page_items = items
+                    break
+            if not page_items:
+                page_items = self._fallback_html_page(page)
 
-                for it in page_items:
-                    if self._push_if_new(it):
-                        added_page += 1
-                        print(f" + {it['title']} | {it.get('datetime', it['date'])} | [{kw}]")
+            for it in page_items:
+                if self._push_if_new(it):
+                    added_page += 1
+                    print(f" + {it['title']} | {it.get('datetime', it['date'])}")
 
-                added_total += added_page
-                print(f"第{page}页：命中 {added_page} 条。")
+            added_total += added_page
+            print(f"第{page}页：命中 {added_page} 条。")
 
-        print(f"\n完成：共抓到 {added_total} 条窗口内结果（去重后）。")
+        print(f"完成：[{self.keyword}] 共抓到 {added_total} 条窗口内结果。")
         return self.results
 
     def save(self, fmt="both"):
@@ -352,38 +368,35 @@ class PeopleSearch:
             print("无结果可保存。")
             return []
         ts = self.end_dt.strftime("%Y%m%d_%H%M%S")
+        kwslug = slugify_kw(self.keyword)
         out = []
         if fmt in ("csv", "both"):
-            fn = f"people_search_{ts}.csv"
+            fn = f"people_search_{kwslug}_{ts}.csv"
             with open(fn, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.DictWriter(f, fieldnames=["title", "url", "source", "date", "datetime", "kw", "content"])
+                w = csv.DictWriter(f, fieldnames=["title", "url", "source", "date", "datetime", "content"])
                 w.writeheader()
                 w.writerows(self.results)
-            out.append(fn)
-            print("CSV:", fn)
+            out.append(fn); print("CSV:", fn)
         if fmt in ("json", "both"):
-            fn = f"people_search_{ts}.json"
+            fn = f"people_search_{kwslug}_{ts}.json"
             with open(fn, "w", encoding="utf-8") as f:
                 json.dump(self.results, f, ensure_ascii=False, indent=2)
-            out.append(fn)
-            print("JSON:", fn)
+            out.append(fn); print("JSON:", fn)
         return out
 
     def to_markdown(self, limit=12):
-        keys = "、".join(self.keywords)
         rng = f"{self.start_dt.strftime('%Y-%m-%d %H:%M')} ~ {self.end_dt.strftime('%Y-%m-%d %H:%M')} ({self.end_dt.tzinfo.key})"
         if not self.results:
-            return f"### 人民网搜索（最近N小时）\n**关键词组：{keys}**\n**时间窗：{rng}**\n> 窗口内未找到符合条件的结果。"
+            return f"### 人民网搜索（最近N小时）\n**关键词：{self.keyword}**\n**时间窗：{rng}**\n> 窗口内未找到符合条件的结果。"
         lines = [
             "### 人民网搜索（最近N小时）",
-            f"**关键词组：{keys}**",
+            f"**关键词：{self.keyword}**",
             f"**时间窗：{rng}**",
             "",
             "#### 结果",
         ]
         for i, it in enumerate(self.results[:limit], 1):
-            tag = it.get("kw", "")
-            lines.append(f"{i}. [{it['title']}]({it['url']})  `#{tag}`")
+            lines.append(f"{i}. [{it['title']}]({it['url']})")
             lines.append(f"> ⏱️ {it.get('datetime', it['date'])} | 🏛️ {it['source']}")
             if it.get("content"):
                 lines.append(f"> {it['content'][:120]}")
@@ -391,9 +404,10 @@ class PeopleSearch:
         return "\n".join(lines)
 
 
+# ====== 参数计算 ======
 def compute_window_args(args):
     tz = ZoneInfo(args.tz)
-    # 优先 since/until
+    # since/until > window-hours
     if args.since or args.until:
         end_dt = parse_local_dt(args.until, tz) if args.until else datetime.now(tz)
         start_dt = parse_local_dt(args.since, tz) if args.since else end_dt - timedelta(hours=args.window_hours)
@@ -406,9 +420,9 @@ def compute_window_args(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="People.cn 搜索：最近N小时 + 多关键词 + 翻页 → 钉钉推送（接口优先）")
+    ap = argparse.ArgumentParser(description="People.cn 搜索：最近N小时 + 单关键词顺序抓取 → 分别保存+分别推送")
     ap.add_argument("--keyword", default="外包", help="单个关键词（兼容旧参数）")
-    ap.add_argument("--keywords", default=None, help="多个关键词，用逗号/空格/竖线分隔，如：外包,派遣,人力资源")
+    ap.add_argument("--keywords", default=None, help="多个关键词，逗号/空格/竖线分隔，如：外包,人力资源,派遣")
     ap.add_argument("--pages", type=int, default=1, help="每个关键词最多翻页数（默认：1）")
     ap.add_argument("--delay", type=int, default=120, help="同域请求间隔秒（默认：120，遵守 robots）")
     ap.add_argument("--tz", default="Asia/Shanghai", help="时区（默认：Asia/Shanghai）")
@@ -416,27 +430,30 @@ def main():
     ap.add_argument("--window-hours", type=int, default=24, help="最近N小时（默认：24）")
     ap.add_argument("--since", default=None, help="开始时间，如 '2025-09-11 08:00'")
     ap.add_argument("--until", default=None, help="结束时间，如 '2025-09-12 08:00'")
+    ap.add_argument("--page-size", type=int, default=20, help="每页条数（默认：20，最大：50）")
     args = ap.parse_args()
 
     start_ms, end_ms, tz = compute_window_args(args)
+    # 解析关键词清单（按你的要求：顺序抓取）
     kws = parse_keywords_arg(args)
 
-    spider = PeopleSearch(
-        keywords=kws,
-        max_pages=args.pages,
-        delay=args.delay,
-        tz=args.tz,
-        start_ms=start_ms,
-        end_ms=end_ms,
-    )
-    spider.run()
-    if args.save != "none":
-        spider.save(args.save)
-
-    md = spider.to_markdown()
-    title_k = "、".join(kws[:3]) + ("…" if len(kws) > 3 else "")
-    ok = send_dingtalk_markdown(f"人民网搜索（{title_k}）最近{args.window_hours}小时结果", md)
-    print("钉钉推送：", "成功 ✅" if ok else "失败 ❌")
+    for kw in kws:
+        spider = PeopleSearch(
+            keyword=kw,
+            max_pages=args.pages,
+            delay=args.delay,
+            tz=args.tz,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            page_limit=args.page_size,
+        )
+        spider.run()
+        if args.save != "none":
+            spider.save(args.save)
+        md = spider.to_markdown()
+        title = f"人民网搜索（{kw}）最近{args.window_hours}小时结果"
+        ok = send_dingtalk_markdown(title, md)
+        print(f"钉钉推送[{kw}]：", "成功 ✅" if ok else "失败 ❌")
 
 
 if __name__ == "__main__":
