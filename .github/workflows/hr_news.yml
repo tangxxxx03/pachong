@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   # 每天 08:00（Asia/Shanghai）运行；UTC=00:00
   schedule:
-    - cron: '0 21 * * *'
+    - cron: '0 21 * * 1-5'
 
 jobs:
   crawl:
