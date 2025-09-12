@@ -1,33 +1,19 @@
 name: HR News Crawler
 
 on:
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch: {}
+  # 每天 08:00（Asia/Shanghai）运行 → 换算为 UTC 00:00
   schedule:
-    - cron: '0 1 * * *'  # 每天 09:00 北京时间运行（GitHub 用 UTC，这里是 01:00 UTC）
-
-concurrency:
-  group: hr-crawler-${{ github.ref }}
-  cancel-in-progress: true
+    - cron: "0 0 * * *"
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
     env:
-      # ===== 必填：从 Secrets 注入（仓库 Settings → Secrets and variables → Actions）=====
-      DINGTALK_BASE:   ${{ secrets.DINGTALK_BASE }}     # 形如 https://oapi.dingtalk.com/robot/send?access_token=xxxx
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}   # 形如 SECxxxxxxxx
-
-      # ===== 可选：从 Variables 注入（或直接删掉这些 env）=====
-      DINGTALK_KEYWORD_HR: ${{ vars.DINGTALK_KEYWORD_HR }}  # 若你的机器人启用了“关键词触发”，写在这里
-      HR_FILTER_KEYWORDS: "人力资源,外包"   # 标题/摘要关键词（逗号分隔）
-      HR_REQUIRE_ALL: "0"                  # 1=必须全部命中；0=命中其一即可
-      HR_ONLY_TODAY: "1"                   # 只要当天
-      HR_TZ: "Asia/Shanghai"               # 时区
-      HR_SAVE_FORMAT: "both"               # csv/json/both
-      HR_MAX_ITEMS: "10"                   # 每个来源最多条数
-
+      TZ: Asia/Shanghai
+      # 如启用你自己的钉钉机器人，把这两项在仓库 Secrets 里配置后再解开注释
+      # DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}       # 形如 https://oapi.dingtalk.com/robot/send?access_token=XXXX
+      # DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}   # 以 SEC 开头的加签密钥
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,27 +21,35 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
+          python -m pip install -U pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            pip install requests beautifulsoup4 urllib3
+            pip install requests beautifulsoup4 urllib3 backports.zoneinfo
           fi
 
-      - name: Run crawler
+      - name: Run crawler (both: People.cn + HR 多站点)
         run: |
-          python hr_news_crawler.py
+          python hr_news_crawler.py both --keywords "外包,人力资源,派遣" --pages 2 --window-hours 24 --limit 12
+
+      # 如果你只想跑其中一个，把上一段注释掉，改用下面任一段（示例）：
+      # - name: Run crawler (People.cn only)
+      #   run: |
+      #     python hr_news_crawler.py people --keywords "外包,人力资源,派遣" --pages 2 --window-hours 24 --limit 12
+      #
+      # - name: Run crawler (HR 多站点 only)
+      #   run: |
+      #     python hr_news_crawler.py hr --limit 12
 
       - name: Upload results (CSV/JSON)
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hr-news-${{ github.run_id }}
+          name: news-results-${{ github.run_id }}
           path: |
-            hr_news_*.csv
-            hr_news_*.json
+            *.csv
+            *.json
           if-no-files-found: ignore
