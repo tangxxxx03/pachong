@@ -1,19 +1,19 @@
 name: HR News Crawler
 
 on:
-  workflow_dispatch: {}
-  # 每天 08:00（Asia/Shanghai）运行 → 换算为 UTC 00:00
+  workflow_dispatch:
+  # 每天 08:00（Asia/Shanghai）运行；UTC=00:00
   schedule:
-    - cron: "0 0 * * *"
+    - cron: '0 0 * * *'
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
-      # 如启用你自己的钉钉机器人，把这两项在仓库 Secrets 里配置后再解开注释
-      # DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}       # 形如 https://oapi.dingtalk.com/robot/send?access_token=XXXX
-      # DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}   # 以 SEC 开头的加签密钥
+      # 如需你自己的钉钉机器人，建议用仓库 Secrets 配置：
+      # DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      # DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,29 +21,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
+
+      - name: Upgrade pip
+        run: python -m pip install -U pip
 
       - name: Install dependencies
-        run: |
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests beautifulsoup4 urllib3 backports.zoneinfo
-          fi
+        shell: bash
+        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests beautifulsoup4 urllib3 backports.zoneinfo; fi
 
-      - name: Run crawler (both: People.cn + HR 多站点)
-        run: |
-          python hr_news_crawler.py both --keywords "外包,人力资源,派遣" --pages 2 --window-hours 24 --limit 12
-
-      # 如果你只想跑其中一个，把上一段注释掉，改用下面任一段（示例）：
-      # - name: Run crawler (People.cn only)
-      #   run: |
-      #     python hr_news_crawler.py people --keywords "外包,人力资源,派遣" --pages 2 --window-hours 24 --limit 12
-      #
-      # - name: Run crawler (HR 多站点 only)
-      #   run: |
-      #     python hr_news_crawler.py hr --limit 12
+      - name: Run crawler (both: People.cn + HR)
+        run: python hr_news_crawler.py both --keywords '外包,人力资源,派遣' --pages 2 --window-hours 24 --limit 12
 
       - name: Upload results (CSV/JSON)
         uses: actions/upload-artifact@v4
