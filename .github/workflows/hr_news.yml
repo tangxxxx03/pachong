@@ -11,9 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Shanghai
-      # 如需你自己的钉钉机器人，建议用仓库 Secrets 配置：
+      # 可选：用仓库 Secrets 配置你自己的钉钉
       # DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
       # DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,17 +28,23 @@ jobs:
         run: python -m pip install -U pip
 
       - name: Install dependencies
-        shell: bash
         run: if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests beautifulsoup4 urllib3 backports.zoneinfo; fi
 
       - name: Run crawler (both: People.cn + HR)
         run: python hr_news_crawler.py both --keywords '外包,人力资源,派遣' --pages 2 --window-hours 24 --limit 12
 
-      - name: Upload results (CSV/JSON)
+      - name: Upload CSV results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: news-results-${{ github.run_id }}
-          path: |
-            *.csv
-            *.json
+          name: csv-results-${{ github.run_id }}
+          path: "*.csv"
+          if-no-files-found: ignore
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: json-results-${{ github.run_id }}
+          path: "*.json"
           if-no-files-found: ignore
