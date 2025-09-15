@@ -6,12 +6,12 @@
 - both 模式默认“合并推送一个消息，序号连续”；如需分开发两条，加 --separate
 
 示例：
-  # 合并推送（默认）
-  python hr_news_crawler.py both --keywords "外包,人力资源" --pages 2 --window-hours 24 --limit 20
+  # 合并推送（默认，关键词仅“人力资源”）
+  python hr_news_crawler.py both --keywords "人力资源" --pages 2 --window-hours 24 --limit 20
   # 分别推送两条
-  python hr_news_crawler.py both --separate --keywords "外包,人力资源" --pages 2 --window-hours 24
+  python hr_news_crawler.py both --separate --keywords "人力资源" --pages 2 --window-hours 24
   # 单独模块
-  python hr_news_crawler.py people --keywords "外包,人力资源" --pages 2 --window-hours 24
+  python hr_news_crawler.py people --keywords "人力资源" --pages 2 --window-hours 24
   python hr_news_crawler.py hr
 """
 
@@ -170,7 +170,7 @@ class PeopleSearch:
         "http://search.people.cn/api-search/front/search",
     ]
 
-    def __init__(self, keyword="外包", max_pages=1, delay=120,
+    def __init__(self, keyword="人力资源", max_pages=1, delay=120,
                  tz="Asia/Shanghai", start_ms: int | None = None, end_ms: int | None = None, page_limit=20):
         self.keyword = keyword
         self.max_pages = max_pages
@@ -302,7 +302,8 @@ HR_MAX_PER_SOURCE = int(os.getenv("HR_MAX_ITEMS", "10"))
 HR_ONLY_TODAY = os.getenv("HR_ONLY_TODAY", "1").strip().lower() in ("1", "true", "yes", "y")
 HR_TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
 HR_REQUIRE_ALL = os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y")
-HR_KEYWORDS = [k.strip() for k in re.split(r"[,\s，；;|]+", os.getenv("HR_FILTER_KEYWORDS", "人力资源,外包")) if k.strip()]
+# 默认仅“人力资源”
+HR_KEYWORDS = [k.strip() for k in re.split(r"[,\s，；;|]+", os.getenv("HR_FILTER_KEYWORDS", "人力资源")) if k.strip()]
 EXCLUDE_DOMAINS = {"people.com.cn", "www.people.com.cn"}  # 统一剔除人民网域
 
 def now_tz():
@@ -518,8 +519,9 @@ class HRNewsCrawler:
 def build_unified_markdown(tz_str: str, people_blocks: list[list[dict]], hr_items: list[dict], total_limit: int = 20):
     """people_blocks: [[items for kw1], [items for kw2], ...]；hr_items: HR聚合结果"""
     tz = ZoneInfo(tz_str)
-    today_str = datetime.now(tz).strftime("%Y-%m-%d")
-    wd = zh_weekday(datetime.now(tz))
+    now_dt = datetime.now(tz)
+    today_str = now_dt.strftime("%Y-%m-%d")
+    wd = zh_weekday(now_dt)
 
     # 合并顺序：People（按关键词顺序）→ HR
     merged = []
@@ -644,8 +646,8 @@ def main():
 
     # People 子命令
     p = sub.add_parser("people", help="People.cn 站内搜索（最近N小时；多关键词顺序抓取）")
-    p.add_argument("--keyword", default="外包", help="单个关键词（兼容旧参数）")
-    p.add_argument("--keywords", default="外包,人力资源,", help="多个关键词，逗号/空格/竖线分隔")
+    p.add_argument("--keyword", default="人力资源", help="单个关键词（兼容旧参数）")
+    p.add_argument("--keywords", default="人力资源", help="多个关键词，逗号/空格/竖线分隔")
     p.add_argument("--pages", type=int, default=1, help="每个关键词最多翻页数（默认1）")
     p.add_argument("--delay", type=int, default=120, help="同域请求间隔秒（默认120）")
     p.add_argument("--tz", default="Asia/Shanghai", help="时区（默认Asia/Shanghai）")
@@ -664,8 +666,8 @@ def main():
 
     # both 子命令
     b = sub.add_parser("both", help="两者都跑（默认合并推送一个消息，序号连续）")
-    b.add_argument("--keyword", default="外包", help="单个关键词（兼容旧参数）")
-    b.add_argument("--keywords", default="外包,人力资源,派遣", help="多个关键词，逗号/空格/竖线分隔")
+    b.add_argument("--keyword", default="人力资源", help="单个关键词（兼容旧参数）")
+    b.add_argument("--keywords", default="人力资源", help="多个关键词，逗号/空格/竖线分隔")
     b.add_argument("--pages", type=int, default=1, help="每个关键词最多翻页数（默认1）")
     b.add_argument("--delay", type=int, default=120, help="同域请求间隔秒（默认120）")
     b.add_argument("--tz", default="Asia/Shanghai", help="时区（默认Asia/Shanghai）")
