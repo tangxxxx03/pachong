@@ -1,33 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-合并版（统一推送 & 连续编号）
-- People.cn 站内搜索（最近N小时；多关键词顺序抓取，逐关键词合并去重）
-- HR 多站点资讯（仅当天，默认剔除 people.com.cn，且与 People.cn 跨模块去重）
-- both 模式默认“合并推送一个消息，序号连续”；如需分开发两条，加 --separate
-
-示例：
-  # 合并推送（默认，关键词仅“人力资源”）
-  python hr_news_crawler.py both --keywords "人力资源" --pages 2 --window-hours 24 --limit 20
-  # 分别推送两条
-  python hr_news_crawler.py both --separate --keywords "人力资源" --pages 2 --window-hours 24
-  # 单独模块
-  python hr_news_crawler.py people --keywords "人力资源" --pages 2 --window-hours 24
-  python hr_news_crawler.py hr
+HR 多站点资讯（不爬人民网）
+- 仅抓取 HR 站点，当天信息；统一 Markdown 推送钉钉；支持总条数上限、关键词过滤
+- 已彻底删除 People.cn 抓取，并继续对 people.com.cn 域名做域级剔除
+- 兼容：both 模式 == hr 模式（保留旧参数但不再使用）
 """
 
 import os
 import re
 import time
-import csv
-import json
 import argparse
 import hmac
 import hashlib
 import base64
 import urllib.parse
-from urllib.parse import urljoin, urlparse, quote_plus
-from collections import defaultdict
+from urllib.parse import urljoin, urlparse
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 # 兼容 Py<3.9 的 zoneinfo
 try:
@@ -99,7 +88,7 @@ def make_session():
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     })
     retries = Retry(
@@ -127,187 +116,19 @@ def strip_html(html: str) -> str:
 def zh_weekday(dt):
     return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 
-def parse_local_dt(s: str, tz: ZoneInfo) -> datetime:
-    s = (s or "").strip()
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(s, fmt)
-            if fmt == "%Y-%m-%d":
-                dt = dt.replace(hour=0, minute=0)
-            return dt.replace(tzinfo=tz)
-        except Exception:
-            continue
-    raise ValueError(f"无法解析时间：{s}")
+def now_tz():
+    tz = ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai").strip())
+    return datetime.now(tz)
 
-def parse_keywords_arg(raw: str | None, fallback: str) -> list:
-    src = raw if (raw and raw.strip()) else fallback
-    parts = re.split(r"[,\s|，；;]+", src.strip())
-    kws = [p.strip() for p in parts if p.strip()]
-    out, seen = [], set()
-    for k in kws:
-        if k not in seen:
-            out.append(k); seen.add(k)
-    return out
-
-def slugify_kw(kw: str) -> str:
-    return re.sub(r"[^\w\u4e00-\u9fa5]+", "_", kw).strip("_") or "kw"
-
-def days_between(start_dt: datetime, end_dt: datetime) -> set:
-    days = set()
-    d = start_dt.date()
-    last = end_dt.date()
-    for _ in range(8):  # 最多跨7天
-        days.add(d.strftime("%Y-%m-%d"))
-        if d == last:
-            break
-        d = d + timedelta(days=1)
-    return days
-
-# ====================== 模块A：People.cn（最近N小时） ======================
-class PeopleSearch:
-    API_URLS = [
-        "http://search.people.cn/search-platform/front/search",
-        "http://search.people.cn/api-search/front/search",
-    ]
-
-    def __init__(self, keyword="人力资源", max_pages=1, delay=120,
-                 tz="Asia/Shanghai", start_ms: int | None = None, end_ms: int | None = None, page_limit=20):
-        self.keyword = keyword
-        self.max_pages = max_pages
-        self.page_limit = max(1, min(50, int(page_limit)))
-        self.tz = ZoneInfo(tz)
-
-        if start_ms is None or end_ms is None:
-            now = datetime.now(self.tz)
-            self.start_ms = int((now - timedelta(hours=24)).timestamp() * 1000)
-            self.end_ms = int(now.timestamp() * 1000)
-        else:
-            self.start_ms = int(start_ms); self.end_ms = int(end_ms)
-        self.start_dt = datetime.fromtimestamp(self.start_ms / 1000, self.tz)
-        self.end_dt = datetime.fromtimestamp(self.end_ms / 1000, self.tz)
-
-        self.session = make_session()
-        self._next_allowed_time = defaultdict(float)
-        self._domain_delay = {"search.people.cn": delay, "www.people.com.cn": delay, "people.com.cn": delay}
-        self.results, self._seen = [], set()
-
-    def _throttle(self, host: str):
-        delay = self._domain_delay.get(host, 0)
-        now = time.time()
-        next_at = self._next_allowed_time.get(host, 0.0)
-        if delay > 0 and next_at > now:
-            time.sleep(max(0.0, next_at - now))
-        if delay > 0:
-            self._next_allowed_time[host] = time.time() + delay
-
-    def _post_with_throttle(self, url, **kwargs):
-        self._throttle(urlparse(url).netloc)
-        return self.session.post(url, **kwargs)
-
-    def _get_with_throttle(self, url, **kwargs):
-        self._throttle(urlparse(url).netloc)
-        return self.session.get(url, **kwargs)
-
-    def _search_api_page(self, api_url: str, page: int):
-        payload = {
-            "key": self.keyword, "page": page, "limit": self.page_limit,
-            "hasTitle": True, "hasContent": True, "isFuzzy": True,
-            "type": 0, "sortType": 2, "startTime": self.start_ms, "endTime": self.end_ms,
-        }
-        headers = {
-            "Content-Type": "application/json;charset=UTF-8",
-            "Origin": "http://search.people.cn",
-            "Referer": f"http://search.people.cn/s/?keyword={quote_plus(self.keyword)}&page={page}",
-        }
-        try:
-            r = self._post_with_throttle(api_url, json=payload, headers=headers, timeout=25)
-            if r.status_code != 200:
-                return []
-            j = r.json()
-        except Exception:
-            return []
-        data = j.get("data") or j
-        records = (data.get("records") or data.get("list") or data.get("items") or data.get("homePageRecords") or [])
-        out = []
-        for rec in records:
-            title = strip_html(rec.get("title") or rec.get("showTitle") or "")
-            url = (rec.get("url") or rec.get("articleUrl") or rec.get("pcUrl") or "").strip()
-            ts = rec.get("displayTime") or rec.get("publishTime") or rec.get("pubTimeLong")
-            if not (title and url and ts): continue
-            ts = int(ts)
-            if not (self.start_ms <= ts <= self.end_ms): continue
-            dt_str = datetime.fromtimestamp(ts / 1000, self.tz).strftime("%Y-%m-%d %H:%M")
-            digest = strip_html(rec.get("content") or rec.get("abs") or rec.get("summary") or "")
-            source = norm(rec.get("belongsName") or rec.get("mediaName") or rec.get("siteName") or "人民网")
-            out.append({"title": title, "url": url, "source": source, "date": dt_str[:10], "datetime": dt_str, "content": digest[:160]})
-        return out
-
-    def _fallback_html_page(self, page: int):
-        url = f"https://search.people.cn/s/?keyword={quote_plus(self.keyword)}&page={page}"
-        try:
-            resp = self._get_with_throttle(url, timeout=25)
-            resp.encoding = resp.apparent_encoding or "utf-8"
-            if resp.status_code != 200: return []
-            soup = BeautifulSoup(resp.text, "html.parser")
-            scope = soup
-            for sel in ["div.article", "div.content", "div.search", "div.main-container", "div.module-common"]:
-                t = soup.select_one(sel)
-                if t: scope = t; break
-            nodes = []
-            for sel in ["div.article li", "ul li", "li"]:
-                nodes = scope.select(sel)
-                if nodes: break
-            days = days_between(self.start_dt, self.end_dt)
-            out = []
-            for li in nodes:
-                if "page" in " ".join(li.get("class") or []): continue
-                pub = li.select_one(".tip-pubtime")
-                a = li.select_one("a[href]")
-                if not pub or not a: continue
-                m = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})", pub.get_text(" ", strip=True))
-                if not m: continue
-                d = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-                if d not in days: continue
-                title = norm(a.get_text()); href = (a.get("href") or "").strip()
-                if not title or not href or href.startswith(("#", "javascript")): continue
-                full_url = urljoin(url, href)
-                abs_el = li.select_one(".abs")
-                digest = norm(abs_el.get_text(" ", strip=True)) if abs_el else norm(li.get_text(" ", strip=True))
-                out.append({"title": title, "url": full_url, "source": "人民网（搜索）", "date": d, "datetime": d + " 00:00", "content": digest[:160]})
-            return out
-        except Exception:
-            return []
-
-    def _push_if_new(self, item):
-        key = item["url"]
-        if key in self._seen: return False
-        self._seen.add(key); self.results.append(item); return True
-
-    def run(self):
-        added_total = 0
-        for page in range(1, self.max_pages + 1):
-            page_items = []
-            for api in self.API_URLS:
-                page_items = self._search_api_page(api, page)
-                if page_items: break
-            if not page_items: page_items = self._fallback_html_page(page)
-            for it in page_items:
-                if self._push_if_new(it): added_total += 1
-        print(f"[People.cn|{self.keyword}] 抓到 {added_total} 条。")
-        return self.results
-
-# ====================== 模块B：HR 多站点（仅当天，剔除人民网） ======================
-HR_SAVE_FORMAT = os.getenv("HR_SAVE_FORMAT", "none").strip().lower()
+# ====================== HR 多站点（仅当天，剔除人民网） ======================
 HR_MAX_PER_SOURCE = int(os.getenv("HR_MAX_ITEMS", "10"))
 HR_ONLY_TODAY = os.getenv("HR_ONLY_TODAY", "1").strip().lower() in ("1", "true", "yes", "y")
 HR_TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
 HR_REQUIRE_ALL = os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y")
 # 默认仅“人力资源”
 HR_KEYWORDS = [k.strip() for k in re.split(r"[,\s，；;|]+", os.getenv("HR_FILTER_KEYWORDS", "人力资源")) if k.strip()]
-EXCLUDE_DOMAINS = {"people.com.cn", "www.people.com.cn"}  # 统一剔除人民网域
-
-def now_tz():
-    return datetime.now(ZoneInfo(HR_TZ_STR))
+# 统一剔除人民网域
+EXCLUDE_DOMAINS = {"people.com.cn", "www.people.com.cn"}
 
 DEFAULT_SELECTORS = [
     ".list li", ".news-list li", ".content-list li", ".box-list li",
@@ -349,16 +170,18 @@ class HRNewsCrawler:
                     href = a.get("href") or ""
                     full_url = urljoin(base or url, href)
 
-                    # 剔除人民网域
+                    # 域级剔除：人民网
                     host = urlparse(full_url).netloc.lower()
                     if host in EXCLUDE_DOMAINS:
                         continue
 
                     date_text = self._find_date(node) or self._find_date(a)
-                    if HR_ONLY_TODAY and (not date_text or not self._is_today(date_text)): continue
+                    if HR_ONLY_TODAY and (not date_text or not self._is_today(date_text)): 
+                        continue
 
                     snippet = self._snippet(node)
-                    if not self._hit_keywords(title, snippet): continue
+                    if not self._hit_keywords(title, snippet): 
+                        continue
 
                     item = {"title": title, "url": full_url, "source": source_name, "date": date_text, "content": snippet}
                     if self._push_if_new(item):
@@ -366,7 +189,7 @@ class HRNewsCrawler:
             except Exception:
                 continue
 
-    # 站点列表（可用环境变量覆盖入口）
+    # —— 站点列表（可用环境变量覆盖入口）——
     def crawl_mohrss(self):
         urls = as_list("SRC_MOHRSS_URLS", [
             "https://www.mohrss.gov.cn/",
@@ -374,10 +197,6 @@ class HRNewsCrawler:
             "https://www.mohrss.gov.cn/SYrlzyhshbzb/zwgk/tzgg/index.html",
         ])
         self.crawl_generic("人社部", "https://www.mohrss.gov.cn", urls)
-
-    def crawl_people(self):  # 仍保留入口，但被 EXCLUDE_DOMAINS 屏蔽
-        urls = as_list("SRC_PEOPLE_URLS", ["http://www.people.com.cn/"])
-        self.crawl_generic("人民网", "http://www.people.com.cn", urls)
 
     def crawl_gmw(self):
         urls = as_list("SRC_GMW_URLS", ["https://www.gmw.cn/"])
@@ -445,8 +264,9 @@ class HRNewsCrawler:
         self.crawl_generic("国家统计局", "https://www.stats.gov.cn", urls)
 
     def get_today_news(self):
+        # ⚠️ 已剔除人民网，不再调用其入口
         fns = [
-            self.crawl_beijing_hrss, self.crawl_mohrss, self.crawl_people, self.crawl_gmw, self.crawl_xinhua,
+            self.crawl_beijing_hrss, self.crawl_mohrss, self.crawl_gmw, self.crawl_xinhua,
             self.crawl_chrm, self.crawl_job_mohrss, self.crawl_newjobs, self.crawl_hrloo, self.crawl_hroot,
             self.crawl_chinatax, self.crawl_bjsfj, self.crawl_si_12333, self.crawl_chinahrm,
             self.crawl_newjobs_policy, self.crawl_bj_hr_associations, self.crawl_stats,
@@ -456,7 +276,7 @@ class HRNewsCrawler:
                 fn(); time.sleep(0.6)
             except Exception:
                 continue
-        print(f"[HR多站点] 抓到 {len(self.results)} 条（已剔除人民网域）。")
+        print(f"[HR多站点] 抓到 {len(self.results)} 条（已完全不爬人民网，且域名级剔除 people.com.cn）。")
         return self.results
 
     # 工具
@@ -515,45 +335,27 @@ class HRNewsCrawler:
             return all(k in hay_low for k in kws_low)
         return any(k in hay_low for k in kws_low)
 
-# ====================== 构建“合并推送 & 连续编号”的正文 ======================
-def build_unified_markdown(tz_str: str, people_blocks: list[list[dict]], hr_items: list[dict], total_limit: int = 20):
-    """people_blocks: [[items for kw1], [items for kw2], ...]；hr_items: HR聚合结果"""
+# ====================== 构建推送正文（仅 HR） ======================
+def build_markdown_hr(tz_str: str, hr_items: list[dict], total_limit: int = 20):
     tz = ZoneInfo(tz_str)
     now_dt = datetime.now(tz)
     today_str = now_dt.strftime("%Y-%m-%d")
     wd = zh_weekday(now_dt)
 
-    # 合并顺序：People（按关键词顺序）→ HR
-    merged = []
-    for block in people_blocks:
-        merged.extend(block)
-    # 去重：按URL
-    seen = set()
-    uniq = []
-    for it in merged + hr_items:
-        url = it.get("url") or ""
-        if url in seen:
-            continue
-        seen.add(url)
-        uniq.append(it)
-
-    # 截断总条数
-    if total_limit and total_limit > 0:
-        uniq = uniq[:total_limit]
+    items = hr_items[:total_limit] if (total_limit and total_limit > 0) else hr_items
 
     lines = [
         f"**日期：{today_str}（{wd}）**",
         "",
-        f"**标题：早安资讯｜综合**",
+        f"**标题：早安资讯｜HR综合**",
         "",
         "**主要内容**",
     ]
-    if not uniq:
+    if not items:
         lines.append("> 暂无更新。")
         return "\n".join(lines)
 
-    for i, it in enumerate(uniq, 1):
-        # 在标题行后追加轻量来源（不增加层级）
+    for i, it in enumerate(items, 1):
         title_line = f"{i}. [{it['title']}]({it['url']})"
         if it.get("source"):
             title_line += f"　—　*{it['source']}*"
@@ -564,130 +366,48 @@ def build_unified_markdown(tz_str: str, people_blocks: list[list[dict]], hr_item
     return "\n".join(lines)
 
 # ====================== 运行入口 ======================
-def compute_people_window(args):
-    tz = ZoneInfo(args.tz)
-    if args.since or args.until:
-        end_dt = parse_local_dt(args.until, tz) if args.until else datetime.now(tz)
-        start_dt = parse_local_dt(args.since, tz) if args.since else end_dt - timedelta(hours=args.window_hours)
-    else:
-        end_dt = datetime.now(tz)
-        start_dt = end_dt - timedelta(hours=args.window_hours)
-    if start_dt >= end_dt:
-        raise ValueError("开始时间必须早于结束时间")
-    return int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
-
-def run_people(args):
-    start_ms, end_ms = compute_people_window(args)
-    kws = parse_keywords_arg(args.keywords, args.keyword)
-    people_blocks = []
-    all_urls = set()
-    for kw in kws:
-        spider = PeopleSearch(
-            keyword=kw, max_pages=args.pages, delay=args.delay, tz=args.tz,
-            start_ms=start_ms, end_ms=end_ms, page_limit=args.page_size,
-        )
-        items = spider.run() or []
-        # 去重（跨关键词）
-        block = []
-        for it in items:
-            if it["url"] in all_urls:
-                continue
-            all_urls.add(it["url"])
-            block.append(it)
-        people_blocks.append(block)
-
-        # 单独推送（仅 people 模式使用）
-        if args.mode == "people":
-            md = build_unified_markdown(args.tz, [block], [], args.limit)
-            send_dingtalk_markdown(f"早安资讯｜{kw}", md)
-    return people_blocks
-
-def run_hr(args, people_seen_urls=None):
+def run_hr(args):
     crawler = HRNewsCrawler()
     items = crawler.get_today_news() or []
-    # 跨模块去重（避免与 People.cn 重复）
-    if people_seen_urls:
-        items = [it for it in items if it.get("url") not in people_seen_urls]
-    # 单独推送（仅 hr 模式使用）
-    if args.mode == "hr":
-        md = build_unified_markdown(args.tz, [], items, args.limit)
-        send_dingtalk_markdown("早安资讯｜HR综合", md)
+    md = build_markdown_hr(args.tz, items, args.limit)
+    send_dingtalk_markdown("早安资讯｜HR综合（不含人民网）", md)
     return items
 
 def run_both(args):
-    # 先跑 People，各关键词块 + URL 集合
-    people_blocks = run_people(args)
-    seen_urls = set()
-    for blk in people_blocks:
-        for it in blk:
-            if it.get("url"):
-                seen_urls.add(it["url"])
-
-    # 再跑 HR，并剔除与 People 重复
-    hr_items = run_hr(args, seen_urls)
-
-    if args.separate:
-        # 分别推送
-        for blk in people_blocks:
-            if blk:
-                md = build_unified_markdown(args.tz, [blk], [], args.limit)
-                send_dingtalk_markdown("早安资讯｜人民网", md)
-        if hr_items:
-            md = build_unified_markdown(args.tz, [], hr_items, args.limit)
-            send_dingtalk_markdown("早安资讯｜HR综合（非人民网）", md)
-    else:
-        # 合并推送，序号连续
-        md = build_unified_markdown(args.tz, people_blocks, hr_items, args.limit)
-        send_dingtalk_markdown("早安资讯｜综合", md)
+    # 兼容旧口令：both == hr
+    return run_hr(args)
 
 def main():
-    parser = argparse.ArgumentParser(description="People.cn + HR 多站合并推送（连续编号）")
-    sub = parser.add_subparsers(dest="mode")  # 允许不填（见下）
+    parser = argparse.ArgumentParser(description="HR 多站合并推送（不爬人民网）")
+    sub = parser.add_subparsers(dest="mode")
 
-    # People 子命令
-    p = sub.add_parser("people", help="People.cn 站内搜索（最近N小时；多关键词顺序抓取）")
-    p.add_argument("--keyword", default="人力资源", help="单个关键词（兼容旧参数）")
-    p.add_argument("--keywords", default="人力资源", help="多个关键词，逗号/空格/竖线分隔")
-    p.add_argument("--pages", type=int, default=1, help="每个关键词最多翻页数（默认1）")
-    p.add_argument("--delay", type=int, default=120, help="同域请求间隔秒（默认120）")
-    p.add_argument("--tz", default="Asia/Shanghai", help="时区（默认Asia/Shanghai）")
-    p.add_argument("--window-hours", type=int, default=24, help="最近N小时（默认24）")
-    p.add_argument("--since", default=None, help="开始时间，如 '2025-09-11 08:00'")
-    p.add_argument("--until", default=None, help="结束时间，如 '2025-09-12 08:00'")
-    p.add_argument("--page-size", type=int, default=20, help="每页条数（默认20，最大50）")
-    p.add_argument("--limit", type=int, default=20, help="合并时展示总条数上限（默认20）")
-    p.add_argument("--separate", action="store_true", help="both 模式下改为分别推送两条")
-
-    # HR 子命令
-    h = sub.add_parser("hr", help="HR 多站点资讯（当天，默认剔除人民网）")
+    # hr 子命令
+    h = sub.add_parser("hr", help="HR 多站点资讯（当天，剔除 people.com.cn 域）")
     h.add_argument("--tz", default="Asia/Shanghai", help="时区（默认Asia/Shanghai）")
-    h.add_argument("--limit", type=int, default=20, help="合并时展示总条数上限（默认20）")
-    h.add_argument("--separate", action="store_true", help="both 模式下改为分别推送两条")
+    h.add_argument("--limit", type=int, default=20, help="展示总条数上限（默认20）")
 
-    # both 子命令
-    b = sub.add_parser("both", help="两者都跑（默认合并推送一个消息，序号连续）")
-    b.add_argument("--keyword", default="人力资源", help="单个关键词（兼容旧参数）")
-    b.add_argument("--keywords", default="人力资源", help="多个关键词，逗号/空格/竖线分隔")
-    b.add_argument("--pages", type=int, default=1, help="每个关键词最多翻页数（默认1）")
-    b.add_argument("--delay", type=int, default=120, help="同域请求间隔秒（默认120）")
+    # both 子命令（为兼容旧用法而保留，但行为与 hr 相同）
+    b = sub.add_parser("both", help="兼容旧命令；行为等同于 hr（不爬人民网）")
     b.add_argument("--tz", default="Asia/Shanghai", help="时区（默认Asia/Shanghai）")
-    b.add_argument("--window-hours", type=int, default=24, help="最近N小时（默认24）")
-    b.add_argument("--since", default=None, help="开始时间")
-    b.add_argument("--until", default=None, help="结束时间")
-    b.add_argument("--page-size", type=int, default=20, help="每页条数（默认20，最大50）")
-    b.add_argument("--limit", type=int, default=20, help="合并时展示总条数上限（默认20）")
-    b.add_argument("--separate", action="store_true", help="改为分别推送两条")
+    b.add_argument("--limit", type=int, default=20, help="展示总条数上限（默认20）")
+    # 下面这些旧参数会被忽略（保留仅为避免报错）
+    b.add_argument("--keyword", default="人力资源")
+    b.add_argument("--keywords", default="人力资源")
+    b.add_argument("--pages", type=int, default=1)
+    b.add_argument("--delay", type=int, default=120)
+    b.add_argument("--window-hours", type=int, default=24)
+    b.add_argument("--since", default=None)
+    b.add_argument("--until", default=None)
+    b.add_argument("--page-size", type=int, default=20)
+    b.add_argument("--separate", action="store_true")
 
     args = parser.parse_args()
-    # 兼容：未填 mode 时默认 both
     if not getattr(args, "mode", None):
-        args.mode = os.getenv("MODE", "both").lower()
-        if args.mode not in {"people", "hr", "both"}:
-            args.mode = "both"
+        args.mode = os.getenv("MODE", "hr").lower()
+        if args.mode not in {"hr", "both"}:
+            args.mode = "hr"
 
-    if args.mode == "people":
-        run_people(args)
-    elif args.mode == "hr":
+    if args.mode == "hr":
         run_hr(args)
     else:
         run_both(args)
