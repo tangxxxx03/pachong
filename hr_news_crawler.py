@@ -33,9 +33,9 @@ import ssl
 # ====================== DingTalk 统一配置 ======================
 DEFAULT_DINGTALK_WEBHOOK = (
     "https://oapi.dingtalk.com/robot/send?"
-    "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+    "access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
 )
-DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
+DEFAULT_DINGTALK_SECRET = "SEC4d9521a7cf6f96fcf6ea9832116df97b13300441f4e513f487a6502d833def75"
 
 DINGTALK_BASE   = os.getenv("DINGTALK_BASE", DEFAULT_DINGTALK_WEBHOOK).strip()
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", DEFAULT_DINGTALK_SECRET).strip()
