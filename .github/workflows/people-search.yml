@@ -1,18 +1,19 @@
-name: People Search (Today Only)
+name: HR Search (Yesterday Only)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 * * *"   # 每天 09:15 CST
+    - cron: "15 1 * * *"   # 每天 09:15 CST 运行（UTC+8）
+
+# 防止并发重叠
+concurrency:
+  group: hr-search-yesterday
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
-    # 可选：避免并发重叠运行
-    concurrency:
-      group: people-search-today
-      cancel-in-progress: false
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -26,24 +27,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 urllib3
 
-      # （可选）打印时间/代理，便于排错
+      # 可选：打印环境与代理，便于排错
       - name: Debug env
         run: |
           date -u
           env | grep -i proxy || true
 
-      - name: Run people search
-      env:
-  QUERY: "外包"
-  DATE: "yesterday"    # 或写成 2025-09-15
-  PAGES: "2"
-  LIMIT: "50"
-  DELAY: "0.5"
-  DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-  DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+      - name: Run HR search (yesterday only)
+        env:
+          # —— 业务参数（按需改这里）——
+          QUERY: "外包"            # 关键词
+          DATE: "yesterday"        # 只抓“昨天”；也可写成 2025-09-15
+          PAGES: "2"               # 每站翻页数
+          LIMIT: "50"              # 输出条数上限
+          DELAY: "0.5"             # 请求间隔（秒）
 
-        
-          # 如只打印不推送，将下行设为 "true"
+          # —— 钉钉机器人（使用仓库 Secrets）——
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+
+          # 只打印不推送（调试时可设为 "true"）
           NO_PUSH: "false"
         run: |
           # 清理代理，避免被代理干扰
@@ -51,12 +54,12 @@ jobs:
           set -e
 
           # 组织命令（根据 NO_PUSH 决定是否加 --no-push）
-          CMD="python people_search_today.py \
+          CMD="python hr_search_24h_dingtalk.py \
             --q \"${QUERY}\" \
             --pages \"${PAGES}\" \
-            --window-hours \"${WINDOW_HOURS}\" \
             --delay \"${DELAY}\" \
-            --limit \"${LIMIT}\""
+            --limit \"${LIMIT}\" \
+            --date \"${DATE}\""
 
           if [ "${NO_PUSH}" = "true" ]; then
             CMD="${CMD} --no-push"
@@ -68,7 +71,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: people-search-results
+          name: hr-search-yesterday
           path: |
             people_search_*.csv
             people_search_*.json
