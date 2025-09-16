@@ -1,28 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-hr_search_24h_dingtalk.py  — 稳健版
-改动亮点：
-  1) --q 不再 required，默认 "人力资源"（再也不会因忘传参数退出）
-  2) 钉钉 webhook/secret 支持多别名环境变量优先：
-       DINGTALK_WEBHOOK / DINGTALK_BASE / WEBHOOK
-       DINGTALK_SECRET  / SECRET
-     → 解决“改了却还发到旧群”的常见问题
-  3) 运行时打印掩码信息（host + token/secret 末尾6位），方便你确认推送目标（不泄露明文）
-  4) 爬取、时间解析、分页逻辑与原版一致，增加少量兼容与注释
-用法示例：
-  python hr_search_24h_dingtalk.py --q "人力资源" --pages 3 --window-hours 24 --limit 20
-  # 只打印不推送
-  python hr_search_24h_dingtalk.py --no-push
-依赖：
-  pip install requests beautifulsoup4
-  # 若 Python < 3.9：pip install backports.zoneinfo
+hr_search_24h_dingtalk.py  — 昨天专抓版
+新增：
+  - --date 参数：支持 yesterday / YYYY-MM-DD
+  - 仅昨天模式：过滤时间范围为 [昨天00:00, 昨天23:59:59]
+  - 不传 --date 时，保持原有 --window-hours 行为（向后兼容）
 """
 
 import re
 import os
 import time
 import hmac
-import json
 import base64
 import hashlib
 import argparse
@@ -57,7 +45,6 @@ DEFAULT_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781
 
 
 def _first_env(*keys: str, default: str = "") -> str:
-    """取第一个非空环境变量值"""
     for k in keys:
         v = os.getenv(k, "").strip()
         if v:
@@ -70,7 +57,6 @@ DINGTALK_SECRET  = _first_env("DINGTALK_SECRET",  "SECRET",        default=DEFAU
 
 
 def _mask_tail(s: str, keep: int = 6) -> str:
-    """掩码显示，仅保留末尾 keep 位"""
     if not s:
         return ""
     if len(s) <= keep:
@@ -92,7 +78,7 @@ def make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.trust_env = False  # 忽略系统代理，保证可控
+    s.trust_env = False
     return s
 
 
@@ -115,11 +101,9 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
     if not webhook:
         print("🔕 未配置钉钉 Webhook，跳过推送。")
         return False
-
-    # 运行时提示（掩码），避免“发到旧群”
     try:
         host = urlparse(webhook).netloc
-        print(f"[DingTalk] host={host}  token~{_mask_tail(DINGTALK_WEBHOOK, 6)}  secret~{_mask_tail(DINGTALK_SECRET, 6)}")
+        print(f"[DingTalk] host={host}  token~{_mask_tail(DINGTALK_WEBHOOK)}  secret~{_mask_tail(DINGTALK_SECRET)}")
     except Exception:
         pass
 
@@ -136,7 +120,7 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
 
 # ===================== 解析与时间过滤 =====================
 DATE_PATS = [
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30 / 2025/09/16 08:30
+    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30
     r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",                        # 2025-09-16
     r"(\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",               # 09-16 08:30
 ]
@@ -155,12 +139,13 @@ def parse_dt(text: str) -> Optional[datetime]:
             return datetime(y, mo, d, hh, mm, tzinfo=TZ)
         if len(m.groups()) == 3:
             y, mo, d = map(int, m.groups())
-            return datetime(y, mo, d, 0, 0, tzinfo=TZ)
+            # 只有日期时设为中午12:00，避免被24h窗口误杀
+            return datetime(y, mo, d, 12, 0, tzinfo=TZ)
         if len(m.groups()) == 4:
             mo, d, hh, mm = map(int, m.groups())
             y = datetime.now(TZ).year
             return datetime(y, mo, d, hh, mm, tzinfo=TZ)
-    # 相对时间（粗略兜底）
+    # 相对时间
     if re.search(r"(刚刚|分钟|小时前|今天|今日)", t):
         return datetime.now(TZ)
     return None
@@ -171,6 +156,17 @@ def within_last_hours(dt: Optional[datetime], hours: int) -> bool:
         return False
     now = datetime.now(TZ)
     return (now - timedelta(hours=hours)) <= dt <= now
+
+
+def day_range(date_str: str) -> Tuple[datetime, datetime]:
+    """返回某天在本地时区的 [start, end]"""
+    if date_str.lower() == "yesterday":
+        base = datetime.now(TZ).date() - timedelta(days=1)
+    else:
+        base = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start = datetime(base.year, base.month, base.day, 0, 0, 0, tzinfo=TZ)
+    end   = datetime(base.year, base.month, base.day, 23, 59, 59, tzinfo=TZ)
+    return start, end
 
 
 # ===================== 数据结构 =====================
@@ -196,7 +192,7 @@ class MohrssHSearch:
     def _fetch_page(self, page: int) -> str:
         params = {"searchword": self.q}
         if page > 1:
-            params["page"] = page  # 若站点用其他分页名也能兼容“下一页”抓取
+            params["page"] = page
         url = self.BASE + self.PATH + "?" + urlencode(params)
         r = self.session.get(url, timeout=20)
         r.encoding = r.apparent_encoding or "utf-8"
@@ -287,13 +283,12 @@ class JobMohrssSearch:
         self.delay = delay
 
     def _fetch_page(self, page: int, last_next: Optional[str]) -> str:
-        # 优先使用“下一页”链接（适应站点真实分页参数），否则回退 textfield + pageNo
         if last_next:
             url = last_next
         else:
             params = {"textfield": self.q}
             if page > 1:
-                params["pageNo"] = page  # 常见分页名
+                params["pageNo"] = page
             url = self.BASE + self.PATH + "?" + urlencode(params)
         r = self.session.get(url, timeout=20)
         r.encoding = r.apparent_encoding or "utf-8"
@@ -312,7 +307,7 @@ class JobMohrssSearch:
                 nodes = tmp
                 break
         if not nodes:
-            nodes = soup.select("a")  # 兜底
+            nodes = soup.select("a")
 
         items: List[Item] = []
         for node in nodes:
@@ -323,7 +318,7 @@ class JobMohrssSearch:
             href = a.get("href").strip()
             url = urljoin(self.BASE, href)
 
-            # 过滤非本站、或无意义链接
+            # 过滤非本站
             host = urlparse(url).netloc.lower()
             if not host.endswith("mohrss.gov.cn"):
                 continue
@@ -388,17 +383,21 @@ def dedup_by_url(items: List[Item]) -> List[Item]:
     return out
 
 
-def filter_24h(items: List[Item], window_hours: int) -> List[Item]:
-    return [it for it in items if within_last_hours(it.dt, window_hours)]
+def filter_by_range(items: List[Item], start: datetime, end: datetime) -> List[Item]:
+    out: List[Item] = []
+    for it in items:
+        if it.dt and start <= it.dt <= end:
+            out.append(it)
+    return out
 
 
-def build_markdown(items: List[Item], keyword: str) -> str:
+def build_markdown(items: List[Item], keyword: str, title_prefix: str) -> str:
     now_dt = datetime.now(TZ)
     wd = ["周一","周二","周三","周四","周五","周六","周日"][now_dt.weekday()]
     lines = [
         f"**日期：{now_dt.strftime('%Y-%m-%d')}（{wd}）**",
         "",
-        f"**标题：早安资讯｜人社部 & 公共招聘网搜索｜{keyword}**",
+        f"**标题：{title_prefix}｜人社部 & 公共招聘网搜索｜{keyword}**",
         "",
         "**主要内容**",
     ]
@@ -423,44 +422,45 @@ def build_markdown(items: List[Item], keyword: str) -> str:
 
 # ===================== 主流程 =====================
 def main():
-    ap = argparse.ArgumentParser(description="人社部 & 公共招聘网 站内搜索（仅最近N小时）→ 钉钉推送")
+    ap = argparse.ArgumentParser(description="人社部 & 公共招聘网 站内搜索 → 钉钉推送")
     ap.add_argument("--q", default=os.getenv("QUERY", "人力资源"), help="搜索关键词（默认：人力资源；也可用环境变量 QUERY 覆盖）")
     ap.add_argument("--pages", type=int, default=int(os.getenv("PAGES", "2")), help="每站最多翻页数（默认2，可用 env PAGES）")
-    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "24")), help="最近N小时（默认24，可用 env WINDOW_HOURS）")
-    ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY", "1.0")), help="每次请求间隔秒（默认1.0，可用 env DELAY）")
-    ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "20")), help="正文最多展示条数（默认20，可用 env LIMIT）")
+    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "24")), help="滚动窗口小时数（默认24）")
+    ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY", "1.0")), help="每次请求间隔秒（默认1.0）")
+    ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "20")), help="正文最多展示条数（默认20）")
+    ap.add_argument("--date", default=os.getenv("DATE", "yesterday"),
+                    help="抓取指定日期（yesterday 或 YYYY-MM-DD）。若为空则使用 --window-hours 滚动窗口")
     ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
     args = ap.parse_args()
 
     session = make_session()
 
-    # 站点 1
-    hsearch = MohrssHSearch(session, args.q, delay=args.delay)
-    a = hsearch.run(max_pages=args.pages)
-
-    # 站点 2
-    jsearch = JobMohrssSearch(session, args.q, delay=args.delay)
-    b = jsearch.run(max_pages=args.pages)
-
+    # 站点抓取
+    a = MohrssHSearch(session, args.q, delay=args.delay).run(max_pages=args.pages)
+    b = JobMohrssSearch(session, args.q, delay=args.delay).run(max_pages=args.pages)
     all_items = dedup_by_url(a + b)
 
-    # 仅最近 N 小时
-    all_items = filter_24h(all_items, args.window_hours)
+    title_prefix = "早安资讯"
+    # 时间过滤：优先使用 --date（默认 yesterday），否则回退 --window-hours
+    if args.date:
+        start, end = day_range(args.date)
+        all_items = filter_by_range(all_items, start, end)
+        title_prefix = f"{args.date} 专题"
+    else:
+        all_items = [it for it in all_items if within_last_hours(it.dt, args.window_hours)]
 
-    # 按时间降序（解析不到时间的排最后）
+    # 排序+截断
     all_items.sort(key=lambda x: x.dt or datetime(1970, 1, 1, tzinfo=TZ), reverse=True)
-
-    # 截断展示条数
     show = all_items[:args.limit] if args.limit and args.limit > 0 else all_items
 
-    print(f"✅ 合计候选 {len(a)+len(b)} 条；窗口内（最近 {args.window_hours}h）命中 {len(all_items)} 条；展示 {len(show)} 条。")
+    print(f"✅ 合计候选 {len(a)+len(b)} 条；筛选后 {len(all_items)} 条；展示 {len(show)} 条。")
 
-    md = build_markdown(show, args.q)
+    md = build_markdown(show, args.q, title_prefix)
     print("\n--- Markdown Preview ---\n")
     print(md)
 
     if not args.no_push:
-        ok = send_dingtalk_markdown(f"早安资讯｜部网&招聘网搜索｜{args.q}", md)
+        ok = send_dingtalk_markdown(f"{title_prefix}｜部网&招聘网搜索｜{args.q}", md)
         print("钉钉推送：", "成功 ✅" if ok else "失败/未推送 ❌")
 
 
