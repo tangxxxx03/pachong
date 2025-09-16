@@ -33,16 +33,16 @@ jobs:
           env | grep -i proxy || true
 
       - name: Run people search
-        env:
-          # —— 业务参数（按需改这里）——
-          QUERY: "外包"           # 关键词；脚本参数是 --q
-          PAGES: "1"              # 每站翻页数
-          WINDOW_HOURS: "24"      # 仅抓最近 N 小时
-          LIMIT: "50"             # 输出条数上限
-          DELAY: "120"            # 请求间隔（秒）
-          # —— 钉钉机器人（从仓库 secrets 读取；如只调试可不填）——
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+      env:
+  QUERY: "外包"
+  DATE: "yesterday"    # 或写成 2025-09-15
+  PAGES: "2"
+  LIMIT: "50"
+  DELAY: "0.5"
+  DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+  DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+
+        
           # 如只打印不推送，将下行设为 "true"
           NO_PUSH: "false"
         run: |
