@@ -1,244 +1,442 @@
 # -*- coding: utf-8 -*-
 """
-mohrss_search_24h.py
-针对 https://www.mohrss.gov.cn/hsearch/ 的站内搜索抓取（仅保留最近 N 小时，默认 24h）
+hr_search_24h_dingtalk.py
+目标：
+  1) 人社部官网站内搜索：https://www.mohrss.gov.cn/hsearch/?searchword=关键词
+  2) 中国公共招聘网站内搜索：http://job.mohrss.gov.cn/zxss/index.jhtml?textfield=关键词
+只抓“最近 N 小时”（默认 24 小时）的结果；输出极简 Markdown（日期/标题/主要内容），并推送到钉钉（加签）。
 
 用法示例：
-  python mohrss_search_24h.py --q "人力资源" --pages 3 --window-hours 24 --save both
+  python hr_search_24h_dingtalk.py --q "人力资源" --pages 3 --window-hours 24 --limit 20
+  # 只想本地打印，不推送钉钉：
+  # python hr_search_24h_dingtalk.py --q "人力资源" --no-push
 
-说明：
-- 脚本会请求 /hsearch/ 页面（GET），并尝试解析列表条目中的标题/链接/时间/摘要。
-- 只保留发布时间在当前 Asia/Shanghai 时区内最近 window-hours 小时的条目。
-- 若站点结构变化，解析器尽量通过多种选择器和正则宽容匹配。
+依赖：
+  pip install requests beautifulsoup4
+  # 若 Python < 3.9：
+  # pip install backports.zoneinfo
 """
 
 import re
+import os
 import time
+import hmac
 import json
-import csv
+import base64
+import hashlib
 import argparse
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+from urllib.parse import urljoin, urlencode, urlparse
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo  # Python3.9+
-from urllib.parse import urljoin, urlencode
+
+try:
+    from zoneinfo import ZoneInfo  # Py3.9+
+except Exception:  # pragma: no cover
+    from backports.zoneinfo import ZoneInfo
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-BASE = "https://www.mohrss.gov.cn"
-SEARCH_PATH = "/hsearch/"
 
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) "
-              "Chrome/123.0.0.0 Safari/537.36")
+# ===================== 全局配置 =====================
+TZ = ZoneInfo("Asia/Shanghai")
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/123.0.0.0 Safari/537.36")
 
-DATE_PATTERNS = [
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s*(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30 or 2025/09/16 08:30
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",                         # 2025-09-16
-    r"(\d{1,2})[^\d](\d{1,2})\s*(\d{1,2}):(\d{1,2})",                # 09-16 08:30
-]
+# 你的钉钉（支持环境变量覆盖）
+DEFAULT_WEBHOOK = (
+    "https://oapi.dingtalk.com/robot/send?"
+    "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+)
+DEFAULT_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_BASE", DEFAULT_WEBHOOK).strip()
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", DEFAULT_SECRET).strip()
 
-def make_session():
+
+# ===================== HTTP 工具 =====================
+def make_session() -> requests.Session:
     s = requests.Session()
-    s.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "zh-CN,zh;q=0.9"})
-    retries = Retry(total=3, backoff_factor=0.6, status_forcelist=(429,500,502,503,504), allowed_methods=frozenset(["GET","POST"]))
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.mount("http://", HTTPAdapter(max_retries=retries))
+    s.headers.update({"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9"})
+    retries = Retry(
+        total=3,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.trust_env = False
     return s
 
-def parse_date_text(txt, tz):
-    """尝试从文本解析出带时区的 datetime；若失败返回 None"""
-    if not txt:
+
+# ===================== DingTalk 推送 =====================
+def _sign_webhook(base_webhook: str, secret: str) -> str:
+    if not base_webhook:
+        return ""
+    if not secret:
+        return base_webhook
+    ts = str(round(time.time() * 1000))
+    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
+    hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign, digestmod=hashlib.sha256).digest()
+    sign = requests.utils.quote(base64.b64encode(hmac_code))
+    sep = "&" if "?" in base_webhook else "?"
+    return f"{base_webhook}{sep}timestamp={ts}&sign={sign}"
+
+def send_dingtalk_markdown(title: str, md_text: str) -> bool:
+    webhook = _sign_webhook(DINGTALK_WEBHOOK, DINGTALK_SECRET)
+    if not webhook:
+        print("🔕 未配置钉钉 Webhook，跳过推送。")
+        return False
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": md_text}}
+    try:
+        r = requests.post(webhook, json=payload, timeout=20)
+        ok = (r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("errcode") == 0)
+        print("DingTalk resp:", r.status_code, r.text[:200])
+        return ok
+    except Exception as e:
+        print("DingTalk error:", e)
+        return False
+
+
+# ===================== 解析与时间过滤 =====================
+DATE_PATS = [
+    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30 / 2025/09/16 08:30
+    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",                        # 2025-09-16
+    r"(\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",               # 09-16 08:30
+]
+
+def parse_dt(text: str) -> Optional[datetime]:
+    if not text:
         return None
-    t = txt.strip()
-    # 先常见格式尝试
-    for pat in DATE_PATTERNS:
+    t = re.sub(r"\s+", " ", text.strip())
+    # 明确日期匹配
+    for pat in DATE_PATS:
         m = re.search(pat, t)
-        if m:
-            if len(m.groups()) == 5:
-                y, mo, d, hh, mm = m.groups()
-                try:
-                    return datetime(int(y), int(mo), int(d), int(hh), int(mm), tzinfo=tz)
-                except Exception:
-                    continue
-            if len(m.groups()) == 3:
-                y, mo, d = m.groups()
-                try:
-                    return datetime(int(y), int(mo), int(d), 0, 0, tzinfo=tz)
-                except Exception:
-                    continue
-            if len(m.groups()) == 4:
-                mo, d, hh, mm = m.groups()
-                try:
-                    now = datetime.now(tz)
-                    return datetime(now.year, int(mo), int(d), int(hh), int(mm), tzinfo=tz)
-                except Exception:
-                    continue
-    # 常见相对时间
-    if re.search(r"刚刚|分钟|小时前|今天|今日", t):
-        return datetime.now(tz)
-    # 兜底：返回 None
+        if not m:
+            continue
+        if len(m.groups()) == 5:
+            y, mo, d, hh, mm = map(int, m.groups())
+            return datetime(y, mo, d, hh, mm, tzinfo=TZ)
+        if len(m.groups()) == 3:
+            y, mo, d = map(int, m.groups())
+            return datetime(y, mo, d, 0, 0, tzinfo=TZ)
+        if len(m.groups()) == 4:
+            mo, d, hh, mm = map(int, m.groups())
+            y = datetime.now(TZ).year
+            return datetime(y, mo, d, hh, mm, tzinfo=TZ)
+    # 相对时间
+    if re.search(r"(刚刚|分钟|小时前|今天|今日)", t):
+        return datetime.now(TZ)
     return None
 
-def extract_items_from_search_html(html, base_url, tz):
-    soup = BeautifulSoup(html, "html.parser")
-    items = []
+def within_last_hours(dt: Optional[datetime], hours: int) -> bool:
+    if not dt:
+        return False
+    now = datetime.now(TZ)
+    return (now - timedelta(hours=hours)) <= dt <= now
 
-    # 多策略：常见结果区选择器
-    candidates = []
-    # 常见列表 li
-    for sel in ["ul.search-list li", "div.search-list li", "div.list li", "ul li", "div.result", "div.row"]:
-        found = soup.select(sel)
-        if found:
-            candidates = found
-            break
-    if not candidates:
-        # 兜底：所有 a 元素
-        candidates = soup.select("a")
 
-    for node in candidates:
-        # 找第一个链接
-        a = node if node.name == "a" else node.find("a")
-        if not a or not a.get("href"):
-            continue
-        title = a.get_text(" ", strip=True)
-        href = a.get("href").strip()
-        full_url = urljoin(base_url, href)
-        # 摘要优先 .summary/.abs，其次段落文本
-        abs_el = node.select_one(".summary, .abs, .intro, p")
-        snippet = abs_el.get_text(" ", strip=True) if abs_el else ""
-        # 尝试提取时间：优先 .date/.time/.pubtime 元素，其次整节点文本
-        ttxt = ""
-        for sel in [".date", ".time", ".pubtime", ".f-date", ".info time", ".post-time"]:
-            sub = node.select_one(sel)
-            if sub:
-                ttxt = sub.get_text(" ", strip=True)
+# ===================== 数据结构 =====================
+@dataclass
+class Item:
+    title: str
+    url: str
+    dt: Optional[datetime]
+    content: str
+    source: str
+
+
+# ===================== 站点 1：mohrss.gov.cn/hsearch =====================
+class MohrssHSearch:
+    BASE = "https://www.mohrss.gov.cn"
+    PATH = "/hsearch/"
+
+    def __init__(self, session: requests.Session, q: str, delay: float = 1.0):
+        self.session = session
+        self.q = q
+        self.delay = delay
+
+    def _fetch_page(self, page: int) -> str:
+        params = {"searchword": self.q}
+        if page > 1:
+            params["page"] = page  # 若站点用其他分页名也能兼容“下一页”抓取
+        url = self.BASE + self.PATH + "?" + urlencode(params)
+        r = self.session.get(url, timeout=20)
+        r.encoding = r.apparent_encoding or "utf-8"
+        time.sleep(self.delay)
+        return r.text
+
+    def parse_list(self, html: str) -> Tuple[List[Item], Optional[str]]:
+        soup = BeautifulSoup(html, "html.parser")
+        # 找结果节点
+        nodes = []
+        for sel in ["ul.search-list li", "div.search-list li", "div.list li", "ul li", "div.result", "div.row"]:
+            tmp = soup.select(sel)
+            if tmp:
+                nodes = tmp
                 break
-        if not ttxt:
-            # 可能时间和标题在同一行
-            ttxt = node.get_text(" ", strip=True)
+        if not nodes:
+            nodes = soup.select("a")  # 兜底
 
-        dt = parse_date_text(ttxt, tz)
-        items.append({
-            "title": title,
-            "url": full_url,
-            "datetime": dt.isoformat() if dt else "",
-            "content": snippet,
-            "raw_time_text": ttxt,
-        })
-    return items
+        items: List[Item] = []
+        for node in nodes:
+            a = node if node.name == "a" else node.find("a")
+            if not a or not a.get("href"):
+                continue
+            title = a.get_text(" ", strip=True)
+            href = a.get("href").strip()
+            url = urljoin(self.BASE, href)
 
-def crawl_search(session, q, page=1, page_size=10, delay=1.0):
-    """
-    请求示例 URL:
-      https://www.mohrss.gov.cn/hsearch/?searchword=人力资源&page=1
-    注意：具体参数名（page）若不生效，可通过观察或在浏览器中查看真正的 next link。
-    """
-    params = {"searchword": q}
-    # 一些站可能使用 page 参数
-    if page and page > 1:
-        params["page"] = page
-    url = BASE + SEARCH_PATH + "?" + urlencode(params)
-    r = session.get(url, timeout=20)
-    time.sleep(delay)
-    r.encoding = r.apparent_encoding or "utf-8"
-    return r.text
+            # 内容/摘要
+            abs_el = None
+            for sel in [".summary", ".abs", ".intro", "p"]:
+                abs_el = node.select_one(sel)
+                if abs_el:
+                    break
+            content = abs_el.get_text(" ", strip=True) if abs_el else ""
 
-def filter_recent(items, window_hours, tz):
-    now = datetime.now(tz)
-    start = now - timedelta(hours=window_hours)
-    out = []
+            # 时间
+            ttxt = ""
+            for sel in [".date", ".time", ".pubtime", ".f-date", ".info time", ".post-time"]:
+                sub = node.select_one(sel)
+                if sub:
+                    ttxt = sub.get_text(" ", strip=True)
+                    break
+            if not ttxt:
+                ttxt = node.get_text(" ", strip=True)
+            dt = parse_dt(ttxt)
+
+            items.append(Item(title=title, url=url, dt=dt, content=content, source="人社部站内搜索"))
+
+        # 下一页：尝试查找“下一页”链接（含文字/rel）
+        next_link = None
+        # 常规分页容器
+        for a in soup.select("a"):
+            txt = a.get_text(strip=True)
+            if txt in ("下一页", "下页", "›", ">") or a.get("rel") == ["next"]:
+                href = a.get("href") or ""
+                if href and href != "javascript:;" and not href.startswith("#"):
+                    next_link = urljoin(self.BASE, href)
+                    break
+
+        return items, next_link
+
+    def run(self, max_pages: int) -> List[Item]:
+        all_items: List[Item] = []
+        next_url = None
+        for p in range(1, max_pages + 1):
+            if p == 1 or not next_url:
+                html = self._fetch_page(p)
+            else:
+                r = self.session.get(next_url, timeout=20)
+                r.encoding = r.apparent_encoding or "utf-8"
+                time.sleep(self.delay)
+                html = r.text
+            items, next_url = self.parse_list(html)
+            if not items and p == 1:
+                # 首页都没有，提前结束
+                break
+            all_items.extend(items)
+            if not next_url:
+                break
+        return all_items
+
+
+# ===================== 站点 2：job.mohrss.gov.cn/zxss =====================
+class JobMohrssSearch:
+    BASE = "http://job.mohrss.gov.cn"
+    PATH = "/zxss/index.jhtml"
+
+    def __init__(self, session: requests.Session, q: str, delay: float = 1.0):
+        self.session = session
+        self.q = q
+        self.delay = delay
+
+    def _fetch_page(self, page: int, last_next: Optional[str]) -> str:
+        # 优先使用“下一页”链接（适应站点真实分页参数），否则回退用 textfield + pageNo/page
+        if last_next:
+            url = last_next
+        else:
+            params = {"textfield": self.q}
+            # 常见分页参数名尝试：pageNo 或 page
+            if page > 1:
+                params["pageNo"] = page
+            url = self.BASE + self.PATH + "?" + urlencode(params)
+        r = self.session.get(url, timeout=20)
+        r.encoding = r.apparent_encoding or "utf-8"
+        time.sleep(self.delay)
+        return r.text
+
+    def parse_list(self, html: str) -> Tuple[List[Item], Optional[str]]:
+        soup = BeautifulSoup(html, "html.parser")
+        # 尝试不同列表结构
+        nodes = []
+        for sel in [
+            ".list li", ".news-list li", ".content-list li", ".box-list li",
+            "ul.list li", "ul.news li", "ul li", "li"
+        ]:
+            tmp = soup.select(sel)
+            if tmp:
+                nodes = tmp
+                break
+        if not nodes:
+            nodes = soup.select("a")  # 兜底
+
+        items: List[Item] = []
+        for node in nodes:
+            a = node if node.name == "a" else node.find("a")
+            if not a or not a.get("href"):
+                continue
+            title = a.get_text(" ", strip=True)
+            href = a.get("href").strip()
+            url = urljoin(self.BASE, href)
+
+            # 过滤非本站、或无意义链接
+            host = urlparse(url).netloc.lower()
+            if not host.endswith("mohrss.gov.cn"):
+                continue
+
+            # 摘要
+            abs_el = None
+            for sel in [".summary", ".abs", ".intro", "p"]:
+                abs_el = node.select_one(sel)
+                if abs_el:
+                    break
+            content = abs_el.get_text(" ", strip=True) if abs_el else ""
+
+            # 时间
+            ttxt = ""
+            for sel in [".date", ".time", ".pubtime", ".f-date", ".info time", ".post-time", "em", "span"]:
+                sub = node.select_one(sel)
+                if sub:
+                    maybe = sub.get_text(" ", strip=True)
+                    # 尽量忽略纯“来源/作者”等字段
+                    if re.search(r"\d{2,4}[^\d]\d{1,2}[^\d]\d{1,2}", maybe) or re.search(r"(刚刚|分钟|小时前|今天|今日)", maybe):
+                        ttxt = maybe
+                        break
+            if not ttxt:
+                ttxt = node.get_text(" ", strip=True)
+            dt = parse_dt(ttxt)
+
+            items.append(Item(title=title, url=url, dt=dt, content=content, source="公共招聘网搜索"))
+
+        # 下一页
+        next_link = None
+        for a in soup.select("a"):
+            txt = a.get_text(strip=True)
+            if txt in ("下一页", "下页", "›", ">") or a.get("rel") == ["next"]:
+                href = a.get("href") or ""
+                if href and href != "javascript:;" and not href.startswith("#"):
+                    next_link = urljoin(self.BASE, href)
+                    break
+
+        return items, next_link
+
+    def run(self, max_pages: int) -> List[Item]:
+        all_items: List[Item] = []
+        next_url = None
+        for p in range(1, max_pages + 1):
+            html = self._fetch_page(p, last_next=next_url)
+            items, next_url = self.parse_list(html)
+            if not items and p == 1:
+                break
+            all_items.extend(items)
+            if not next_url:
+                break
+        return all_items
+
+
+# ===================== 汇总、过滤、输出 =====================
+def dedup_by_url(items: List[Item]) -> List[Item]:
+    seen = set(); out: List[Item] = []
     for it in items:
-        dt = None
-        if it.get("datetime"):
-            try:
-                dt = datetime.fromisoformat(it["datetime"])
-            except Exception:
-                dt = None
-        if not dt:
-            # try parse raw_time_text again lightly (already attempted)
-            dt = parse_date_text(it.get("raw_time_text",""), tz)
-        if dt and start <= dt <= now:
-            it["datetime_obj"] = dt
+        if it.url and it.url not in seen:
+            seen.add(it.url)
             out.append(it)
     return out
 
-def save_results(results, prefix="mohrss", fmt="both"):
-    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
-    files = []
-    if fmt in ("csv","both"):
-        fn = f"{prefix}_{ts}.csv"
-        with open(fn, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=["title","url","datetime","content"])
-            w.writeheader()
-            for r in results:
-                w.writerow({"title": r.get("title",""), "url": r.get("url",""), "datetime": r.get("datetime",""), "content": r.get("content","")})
-        files.append(fn)
-    if fmt in ("json","both"):
-        fn = f"{prefix}_{ts}.json"
-        with open(fn, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-        files.append(fn)
-    return files
+def filter_24h(items: List[Item], window_hours: int) -> List[Item]:
+    return [it for it in items if within_last_hours(it.dt, window_hours)]
 
-def to_markdown(results, tz):
-    now_dt = datetime.now(tz)
-    header = f"**日期：{now_dt.strftime('%Y-%m-%d')}（{['周一','周二','周三','周四','周五','周六','周日'][now_dt.weekday()]}）**\n\n**标题：早安资讯｜人社部搜索（最近 {len(results)} 条）**\n\n**主要内容**\n"
-    lines = [header]
-    for i, it in enumerate(results, 1):
-        dt = it.get("datetime_obj") or it.get("datetime") or ""
-        if isinstance(dt, datetime):
-            dt = dt.strftime("%Y-%m-%d %H:%M")
-        lines.append(f"{i}. [{it['title']}]({it['url']})　—　`{dt}`")
-        if it.get("content"):
-            lines.append(f"> {it['content'][:120]}")
+def build_markdown(items: List[Item], keyword: str) -> str:
+    now_dt = datetime.now(TZ)
+    wd = ["周一","周二","周三","周四","周五","周六","周日"][now_dt.weekday()]
+    lines = [
+        f"**日期：{now_dt.strftime('%Y-%m-%d')}（{wd}）**",
+        "",
+        f"**标题：早安资讯｜人社部 & 公共招聘网搜索｜{keyword}**",
+        "",
+        "**主要内容**",
+    ]
+    if not items:
+        lines.append("> 暂无更新。")
+        return "\n".join(lines)
+
+    for i, it in enumerate(items, 1):
+        dt_str = it.dt.strftime("%Y-%m-%d %H:%M") if it.dt else ""
+        title_line = f"{i}. [{it.title}]({it.url})"
+        if it.source:
+            title_line += f"　—　*{it.source}*"
+        if dt_str:
+            title_line += f"　`{dt_str}`"
+        lines.append(title_line)
+        if it.content:
+            # 控制摘要长度
+            snippet = re.sub(r"\s+", " ", it.content).strip()[:120]
+            lines.append(f"> {snippet}")
         lines.append("")
     return "\n".join(lines)
 
+
+# ===================== 主流程 =====================
 def main():
-    ap = argparse.ArgumentParser(description="抓取 mohrss.gov.cn/hsearch/（仅最近N小时）")
-    ap.add_argument("--q", required=True, help="搜索关键词（例如 人力资源）")
-    ap.add_argument("--pages", type=int, default=1, help="最多翻页数（默认1）")
-    ap.add_argument("--page-size", type=int, default=10, help="每页估算条数（仅用于解析时参考）")
-    ap.add_argument("--window-hours", type=int, default=24, help="最近多少小时（默认24）")
-    ap.add_argument("--delay", type=float, default=1.0, help="每次请求延时（秒）")
-    ap.add_argument("--save", choices=["csv","json","both","none"], default="none", help="是否保存结果")
+    ap = argparse.ArgumentParser(description="人社部 & 公共招聘网 站内搜索（仅最近N小时）→ 钉钉推送")
+    ap.add_argument("--q", required=True, help="搜索关键词（例如：人力资源）")
+    ap.add_argument("--pages", type=int, default=2, help="每站最多翻页数（默认2）")
+    ap.add_argument("--window-hours", type=int, default=24, help="最近N小时（默认24）")
+    ap.add_argument("--delay", type=float, default=1.0, help="每次请求间隔秒（默认1.0）")
+    ap.add_argument("--limit", type=int, default=20, help="正文最多展示条数（默认20）")
+    ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
     args = ap.parse_args()
 
-    tz = ZoneInfo("Asia/Shanghai")
     session = make_session()
-    all_items = []
 
-    for p in range(1, args.pages + 1):
-        try:
-            html = crawl_search(session, args.q, page=p, page_size=args.page_size, delay=args.delay)
-            items = extract_items_from_search_html(html, BASE, tz)
-            if not items:
-                # 如果第一页就没内容，提前退出
-                if p == 1:
-                    print("未解析到搜索结果，请检查关键词或搜索页面结构。")
-                break
-            all_items.extend(items)
-        except Exception as e:
-            print("请求或解析第 %d 页异常: %s" % (p, e))
-            continue
+    # 站点 1
+    hsearch = MohrssHSearch(session, args.q, delay=args.delay)
+    a = hsearch.run(max_pages=args.pages)
 
-    recent = filter_recent(all_items, args.window_hours, tz)
-    # 去重（按 URL）
-    seen = set(); uniq = []
-    for it in recent:
-        u = it.get("url")
-        if u and u not in seen:
-            seen.add(u); uniq.append(it)
+    # 站点 2
+    jsearch = JobMohrssSearch(session, args.q, delay=args.delay)
+    b = jsearch.run(max_pages=args.pages)
 
-    print(f"解析到 {len(all_items)} 条候选，窗口内（最近 {args.window_hours} 小时）命中 {len(uniq)} 条。")
-    if args.save != "none":
-        files = save_results(uniq, prefix="mohrss_search", fmt=args.save)
-        print("Saved:", files)
+    all_items = a + b
+    all_items = dedup_by_url(all_items)
 
-    md = to_markdown(uniq, tz)
-    print("\n\n--- MarkDown Preview ---\n")
+    # 仅最近 N 小时
+    all_items = filter_24h(all_items, args.window_hours)
+
+    # 按时间降序（解析不到时间的排最后）
+    all_items.sort(key=lambda x: x.dt or datetime(1970,1,1, tzinfo=TZ), reverse=True)
+
+    # 截断展示条数
+    show = all_items[:args.limit] if args.limit and args.limit > 0 else all_items
+
+    print(f"✅ 合计候选 {len(a)+len(b)} 条；窗口内（最近 {args.window_hours}h）命中 {len(all_items)} 条；展示 {len(show)} 条。")
+
+    md = build_markdown(show, args.q)
+    print("\n--- Markdown Preview ---\n")
     print(md)
+
+    if not args.no_push:
+        ok = send_dingtalk_markdown(f"早安资讯｜部网&招聘网搜索｜{args.q}", md)
+        print("钉钉推送：", "成功 ✅" if ok else "失败/未推送 ❌")
+
 
 if __name__ == "__main__":
     main()
