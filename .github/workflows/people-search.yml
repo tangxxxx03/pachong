@@ -8,6 +8,12 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # 可选：避免并发重叠运行
+    concurrency:
+      group: people-search-today
+      cancel-in-progress: false
+
     steps:
       - uses: actions/checkout@v4
 
@@ -28,13 +34,36 @@ jobs:
 
       - name: Run people search
         env:
-          # 如果你要改关键词/页数/延迟，在这里改
-          KEYWORD: "外包"
-          PAGES: "1"
-          DELAY: "120"
+          # —— 业务参数（按需改这里）——
+          QUERY: "外包"           # 关键词；脚本参数是 --q
+          PAGES: "1"              # 每站翻页数
+          WINDOW_HOURS: "24"      # 仅抓最近 N 小时
+          LIMIT: "50"             # 输出条数上限
+          DELAY: "120"            # 请求间隔（秒）
+          # —— 钉钉机器人（从仓库 secrets 读取；如只调试可不填）——
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+          # 如只打印不推送，将下行设为 "true"
+          NO_PUSH: "false"
         run: |
+          # 清理代理，避免被代理干扰
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
-          python people_search_today.py --keyword "$KEYWORD" --pages "$PAGES" --delay "$DELAY" --save both
+          set -e
+
+          # 组织命令（根据 NO_PUSH 决定是否加 --no-push）
+          CMD="python people_search_today.py \
+            --q \"${QUERY}\" \
+            --pages \"${PAGES}\" \
+            --window-hours \"${WINDOW_HOURS}\" \
+            --delay \"${DELAY}\" \
+            --limit \"${LIMIT}\""
+
+          if [ "${NO_PUSH}" = "true" ]; then
+            CMD="${CMD} --no-push"
+          fi
+
+          echo "[Run] ${CMD}"
+          eval ${CMD}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
