@@ -67,8 +67,8 @@ jobs:
                       return v
               return default
 
-          DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOK", "DINGTALK_BASE", "WEBHOOK", default=DEFAULT_WEBHOOK)
-          DINGTALK_SECRET  = _first_env("DINGTALK_SECRET",  "SECRET",        default=DEFAULT_SECRET)
+          DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOKA", "DINGTALK_BASE", "WEBHOOK", default=DEFAULT_WEBHOOK)
+          DINGTALK_SECRET  = _first_env("DINGTALK_SECRETA",  "SECRET",        default=DEFAULT_SECRET)
 
           def make_session() -> requests.Session:
               s = requests.Session()
