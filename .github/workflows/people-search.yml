@@ -7,11 +7,12 @@ on:
 
 jobs:
   run:
-    # 如果你换成国内自托管 Runner，请把这一行改成：runs-on: [self-hosted, linux, cn]
+    # 如果换成国内自托管 Runner：runs-on: [self-hosted, linux, cn]
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -21,26 +22,53 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 urllib3
 
+      # 把 Python 脚本写入到工作目录（把整段真实脚本放进来）
       - name: Write script
         run: |
           cat > hr_news_auto_range.py <<'PY'
-          # 这里粘贴上面整段 Python 脚本的内容
+          # -*- coding: utf-8 -*-
+          # 下面贴入你那份 “hr_news_auto_range.py” 的完整内容（不要留占位注释）
+          # —— 从第一行 "# -*- coding: utf-8 -*-" 到最后一行 "main()" —— 全部粘贴进来
           PY
+          python -m pyflakes hr_news_auto_range.py || true  # 可选：静态检查
 
       - name: Run
         env:
-          AUTO_RANGE: "true"        # 非周一=昨天，周一=近3天
+          # —— 业务参数 ——
+          AUTO_RANGE: "true"        # 非周一=昨天；周一=近3天
           DAYS_FOR_MONDAY: "3"
           DATE: ""                  # 如需指定某天：2025-09-17 或 yesterday
           PAGES: "2"
           LIMIT: "50"
           DELAY: "0.8"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOKA }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRETA }}
-          NO_PUSH: "false"
+
+          # —— 钉钉 Secrets（建议用标准名）——
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOKA }}   # 你的 webhook
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRETA }}    # 你的加签 secret（没启用加签可留空）
+
+          NO_PUSH: "false"  # 只有为 "true" 时才不推送
         run: |
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
-          python hr_news_auto_range.py --auto-range --days-for-monday "${DAYS_FOR_MONDAY}" --pages "${PAGES}" --delay "${DELAY}" --limit "${LIMIT}" ${DATE:+--date "$DATE"} ${NO_PUSH:+--no-push}
+          set -e
+
+          CMD="python hr_news_auto_range.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
+          if [ -n "${DATE}" ]; then
+            CMD="${CMD} --date \"${DATE}\""
+          else
+            if [ "${AUTO_RANGE}" = "true" ]; then
+              CMD="${CMD} --auto-range --days-for-monday \"${DAYS_FOR_MONDAY}\""
+            else
+              CMD="${CMD} --window-hours \"${WINDOW_HOURS:-48}\""
+            fi
+          fi
+
+          # ✅ 只有当 NO_PUSH="true" 才加 --no-push
+          if [ "${NO_PUSH}" = "true" ]; then
+            CMD="${CMD} --no-push"
+          fi
+
+          echo "[Run] ${CMD}"
+          eval ${CMD}
 
       - name: Upload artifacts (optional)
         uses: actions/upload-artifact@v4
