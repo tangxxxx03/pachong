@@ -58,8 +58,8 @@ def _first_env(*keys: str, default: str = "") -> str:
             return v.strip()
     return default
 
-DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOK", "DINGTALK_BASE", "WEBHOOK", default=DEFAULT_WEBHOOK)
-DINGTALK_SECRET  = _first_env("DINGTALK_SECRET",  "SECRET",        default=DEFAULT_SECRET)
+DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOKA", "DINGTALK_BASE", "WEBHOOK", default=DEFAULT_WEBHOOK)
+DINGTALK_SECRET  = _first_env("DINGTALK_SECRETA",  "SECRET",        default=DEFAULT_SECRET)
 
 # ------------ HTTP 基础 ------------
 def make_session() -> requests.Session:
