@@ -1,4 +1,4 @@
-name: HR Search (Auto Range: Yesterday / Mon-Last3Days)
+name: "HR Search (Auto Range: Yesterday / Mon-Last3Days)"
 
 on:
   workflow_dispatch:
