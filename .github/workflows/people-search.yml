@@ -414,8 +414,8 @@ jobs:
           DELAY: "0.5"
 
           # —— 钉钉机器人（在仓库 Secrets 设置）——
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOKA }}
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRETA }}
 
           # 调试：只打印不推送
           NO_PUSH: "false"
