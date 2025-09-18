@@ -35,8 +35,8 @@ jobs:
           PAGES: "2"
           LIMIT: "50"
           DELAY: "0.8"
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOKA }}
+          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRETA }}
           NO_PUSH: "false"
         run: |
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
