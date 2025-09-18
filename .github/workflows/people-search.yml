@@ -1,9 +1,9 @@
-name: "People Search (Today Only)"
+name: "HR News (Fixed Sections, No Keywords)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 * * *"   # 每天 09:15 CST (UTC+8)
+    - cron: "15 1 * * *"  # 每天 09:15 CST (UTC+8)
 
 jobs:
   run:
@@ -22,48 +22,44 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 urllib3
 
-      # 说明：如果 people_search_today.py 已在仓库根目录，就不需要写入脚本这一步
-      # - name: Write script (如果你需要把脚本写入 runner，再启用这一段)
-      #   run: |
-      #     cat > people_search_today.py <<'PY'
-      #     # 把完整 Python 脚本粘在这里（不要留占位注释）
-      #     PY
-
-      - name: Run people search
+      - name: Run HR news (Mon=last 3 days, else=yesterday)
         env:
-          KEYWORD: "外包"
-          PAGES: "1"
-          DELAY: "1.0"
+          # —— 自动范围：非周一=昨天；周一=近 N 天 ——
+          AUTO_RANGE: "true"
+          DAYS_FOR_MONDAY: "3"
+
+          # —— 抓取参数 ——
+          PAGES: "3"
           LIMIT: "50"
+          DELAY: "1.0"
 
-          # 钉钉：在仓库 Settings → Secrets and variables → Actions 中配置
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
+          # —— 钉钉（注意：用带 A 的 Secrets 名称）——
+          DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOKA }}
+          DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRETA }}
 
-          NO_PUSH: "false"   # 只有填 "true" 才不推送
+          # 设为 "true" 才不推送；默认会推送
+          NO_PUSH: "false"
         run: |
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
           set -e
-
-          # 如果你的脚本参数名是 --q / --pages / --delay / --limit / --no-push，请按需调整
-          CMD="python people_search_today.py \
-            --q \"${KEYWORD}\" \
+          ls -la   # 确认 hr_news_auto_range.py 在根目录
+          CMD="python hr_news_auto_range.py \
             --pages \"${PAGES}\" \
             --delay \"${DELAY}\" \
-            --limit \"${LIMIT}\""
-
+            --limit \"${LIMIT}\" \
+            --auto-range --days-for-monday \"${DAYS_FOR_MONDAY}\""
           if [ "${NO_PUSH}" = "true" ]; then
             CMD="${CMD} --no-push"
           fi
-
           echo "[Run] ${CMD}"
-          eval ${CMD} | tee people_search.log
+          eval ${CMD} | tee hr_news.log
 
       - name: Upload artifacts (optional)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: people-search-results
+          name: hr-news-results
           path: |
-            people_search.log
+            hr_news.log
+            hr_news.md
           if-no-files-found: ignore
