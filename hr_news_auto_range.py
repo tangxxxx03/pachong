@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 hr_news_auto_range.py
-抓取两站固定栏目（不需要关键词）：
-  1) 人社部：rsxw 人社新闻栏目
-     https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/rsxw/
+抓取两个固定栏目（不需要关键词）：
+  1) 人社部：地方动态（dfdt）/ 兼容常见栏目结构
+     https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/
   2) 中国公共招聘网：资讯列表首页（不带关键词）
      http://job.mohrss.gov.cn/zxss/index.jhtml
 
@@ -13,6 +13,7 @@ hr_news_auto_range.py
 也支持：
   --date yesterday / YYYY-MM-DD
   --window-hours N  （在 --auto-range 禁用时生效）
+  --allow-nodate   （允许无时间条目也展示）
 
 依赖：
   pip install requests beautifulsoup4 urllib3
@@ -34,17 +35,19 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# ------------ 全局配置 ------------
+# ===================== 全局配置 =====================
 TZ = ZoneInfo("Asia/Shanghai")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/123.0.0.0 Safari/537.36")
 
 # 栏目地址（固定）
-MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/rsxw/"
+MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"
+# 若你想兼容“人社新闻”，可以把上面这一行改成 rsxw，或在下面 SECTIONS 里追加
+MOHRSS_SECTIONS = [MOHRSS_DFDT]  # 可追加其它栏目
 JOB_ZXSS    = "http://job.mohrss.gov.cn/zxss/index.jhtml"
 
-# 钉钉（可用环境变量覆盖）
+# 钉钉（你要求的 A 变量；可用环境变量覆盖）
 DEFAULT_WEBHOOK = (
     "https://oapi.dingtalk.com/robot/send?"
     "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
@@ -58,10 +61,11 @@ def _first_env(*keys: str, default: str = "") -> str:
             return v.strip()
     return default
 
-DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOKA", "DINGTALK_BASE", "WEBHOOK", default=DEFAULT_WEBHOOK)
-DINGTALK_SECRET  = _first_env("DINGTALK_SECRETA",  "SECRET",        default=DEFAULT_SECRET)
+# —— 使用带 A 的变量名 ——（还兼容备用名）
+DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOKA", "DINGTALK_BASEA", "WEBHOOKA", default=DEFAULT_WEBHOOK)
+DINGTALK_SECRET  = _first_env("DINGTALK_SECRETA",  "SECRETA",        default=DEFAULT_SECRET)
 
-# ------------ HTTP 基础 ------------
+# ===================== HTTP 工具 =====================
 def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9"})
@@ -75,9 +79,10 @@ def make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.trust_env = False
+    s.trust_env = False  # 忽略 runner 上的代理变量，避免被墙干扰
     return s
 
+# ===================== DingTalk 推送 =====================
 def _sign_webhook(base_webhook: str, secret: str) -> str:
     if not base_webhook:
         return ""
@@ -105,11 +110,11 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
         print("DingTalk error:", e)
         return False
 
-# ------------ 时间/解析工具 ------------
+# ===================== 解析与时间工具 =====================
 DATE_PATS = [
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",
-    r"(\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",
+    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30
+    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",                        # 2025-09-16
+    r"(\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",               # 09-16 08:30
 ]
 
 def parse_dt(text: str) -> Optional[datetime]:
@@ -134,6 +139,29 @@ def parse_dt(text: str) -> Optional[datetime]:
         return datetime.now(TZ)
     return None
 
+def fetch_detail_dt(session: requests.Session, url: str, delay: float = 0.6) -> Optional[datetime]:
+    """到详情页补抓发布时间（常见“发布时间：2025-09-17 10:30”）"""
+    try:
+        r = session.get(url, timeout=20)
+        r.encoding = r.apparent_encoding or "utf-8"
+        html = r.text
+        m = re.search(r"(发[布佈]时间|时间)[：:\s]*([0-9]{4}[^\d][0-9]{1,2}[^\d][0-9]{1,2}(?:\s+[0-9]{1,2}:[0-9]{1,2})?)", html)
+        if m:
+            return parse_dt(m.group(2))
+        m2 = re.search(r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?", html)
+        if m2:
+            if m2.lastindex == 5:
+                y, mo, d, hh, mm = map(int, m2.groups())
+                return datetime(y, mo, d, hh, mm, tzinfo=TZ)
+            else:
+                y, mo, d = map(int, m2.groups()[:3])
+                return datetime(y, mo, d, 12, 0, tzinfo=TZ)
+    except Exception:
+        pass
+    finally:
+        time.sleep(delay)
+    return None
+
 def day_range(date_str: str) -> Tuple[datetime, datetime]:
     if date_str.lower() == "yesterday":
         base = datetime.now(TZ).date() - timedelta(days=1)
@@ -154,7 +182,7 @@ def auto_range(days_for_monday: int = 3) -> Tuple[datetime, datetime, str]:
         title = "昨日专辑"
     return start, end, title
 
-# ------------ 数据结构 ------------
+# ===================== 数据结构 =====================
 @dataclass
 class Item:
     title: str
@@ -163,13 +191,13 @@ class Item:
     content: str
     source: str
 
-# ------------ 站点 1：人社部 人社新闻 ------------
-class RsxwMohrss:
+# ===================== 站点 1：人社部（以 dfdt 为主，兼容 ul/li、table 结构） =====================
+class MohrssList:
     BASE = "https://www.mohrss.gov.cn"
-    LIST = MOHRSS_RSXW
 
-    def __init__(self, session: requests.Session, delay: float = 1.0):
+    def __init__(self, session: requests.Session, list_url: str, delay: float = 1.0):
         self.session = session
+        self.list_url = list_url
         self.delay = delay
 
     def _fetch(self, url: str) -> str:
@@ -179,28 +207,47 @@ class RsxwMohrss:
         return r.text
 
     def _page_url(self, page: int) -> str:
-        # 人社部栏目常见分页：index.html、index_2.html、index_3.html...
+        # 常见分页：index.html / index_2.html / index_3.html ...
         if page <= 1:
-            return self.LIST
-        tail = "" if self.LIST.endswith("/") else "/"
-        return urljoin(self.LIST, f"{tail}index_{page}.html")
+            return self.list_url
+        tail = "" if self.list_url.endswith("/") else "/"
+        return urljoin(self.list_url, f"{tail}index_{page}.html")
 
     def parse_list(self, html: str) -> List[Item]:
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
-        # 常见两类结构：
-        # 1) <ul class="..."> <li><a ...>标题</a><span>日期</span></li>
-        # 2) <table> 列表：第一列标题、第三列日期
-        # 3) 兜底：页面所有 a，旁边/同行搜日期
-        # 优先 ul/li
+        # 优先：table 列表（大部分栏目是这种）
+        rows = soup.select("table tr")
+        for tr in rows:
+            a = tr.find("a")
+            if not a or not a.get("href"):
+                continue
+            title = a.get_text(" ", strip=True)
+            if not title:
+                continue
+            url = urljoin(self.BASE, a.get("href").strip())
+            tds = tr.find_all("td")
+            dt_txt = tds[-1].get_text(" ", strip=True) if len(tds) >= 2 else tr.get_text(" ", strip=True)
+            dt = parse_dt(dt_txt)
+            if not dt:
+                dt = fetch_detail_dt(self.session, url, delay=self.delay)
+            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·地方动态"))
+
+        if items:
+            return items
+
+        # 兜底：ul/li 结构
         lis = soup.select("ul li")
         for li in lis:
             a = li.find("a")
-            if not a or not a.get("href"): continue
+            if not a or not a.get("href"):
+                continue
             title = a.get_text(" ", strip=True)
+            if not title:
+                continue
             url = urljoin(self.BASE, a.get("href").strip())
-            # 日期
+            # 尝试取日期
             dt_txt = ""
             for sel in ["span", "em", ".date", ".time"]:
                 node = li.select_one(sel)
@@ -209,43 +256,10 @@ class RsxwMohrss:
             if not dt_txt:
                 dt_txt = li.get_text(" ", strip=True)
             dt = parse_dt(dt_txt)
-            # 摘要
-            content = ""
-            p = li.find("p")
-            if p: content = p.get_text(" ", strip=True)
-            items.append(Item(title=title, url=url, dt=dt, content=content, source="人社部·人社新闻"))
-        if items:
-            return items
+            if not dt:
+                dt = fetch_detail_dt(self.session, url, delay=self.delay)
+            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·地方动态"))
 
-        # 再试表格
-        rows = soup.select("table tr")
-        for tr in rows:
-            a = tr.find("a"); tds = tr.find_all("td")
-            if not a or not a.get("href"): continue
-            title = a.get_text(" ", strip=True)
-            url = urljoin(self.BASE, a.get("href").strip())
-            dt_txt = ""
-            if len(tds) >= 3:
-                dt_txt = tds[-1].get_text(" ", strip=True)
-            elif len(tds) >= 1:
-                dt_txt = tds[0].get_text(" ", strip=True)
-            else:
-                dt_txt = tr.get_text(" ", strip=True)
-            dt = parse_dt(dt_txt)
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·人社新闻"))
-        if items:
-            return items
-
-        # 兜底：全页 a
-        for a in soup.select("a"):
-            if not a.get("href"): continue
-            title = a.get_text(" ", strip=True)
-            if not title: continue
-            url = urljoin(self.BASE, a.get("href").strip())
-            txt = a.parent.get_text(" ", strip=True) if a.parent else title
-            dt = parse_dt(txt)
-            if dt:
-                items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·人社新闻"))
         return items
 
     def run(self, pages: int) -> List[Item]:
@@ -253,13 +267,13 @@ class RsxwMohrss:
         for p in range(1, pages + 1):
             url = self._page_url(p)
             html = self._fetch(url)
-            items = self.parse_list(html)
-            if not items and p == 1:
+            part = self.parse_list(html)
+            if not part and p == 1:
                 break
-            all_items.extend(items)
+            all_items.extend(part)
         return all_items
 
-# ------------ 站点 2：公共招聘网 资讯列表（无关键词） ------------
+# ===================== 站点 2：公共招聘网 资讯列表（table 结构） =====================
 class JobZxss:
     BASE = "http://job.mohrss.gov.cn"
     LIST = JOB_ZXSS
@@ -275,50 +289,53 @@ class JobZxss:
         return r.text
 
     def _page_url(self, page: int) -> str:
-        # 常见分页：?pageNo=2 或 ?page=2；首页无参数
+        # 常见分页：?pageNo=2；首页无参数
         if page <= 1:
             return self.LIST
-        return self.LIST + ("&" if "?" in self.LIST else "?") + urlencode({"pageNo": page})
+        sep = "&" if "?" in self.LIST else "?"
+        return self.LIST + f"{sep}pageNo={page}"
 
     def parse_list(self, html: str) -> List[Item]:
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
-        # 结构一：表格/列表，列：标题 / 分类 / 时间
-        rows = soup.select("table tr, .list li, ul.list li, ul li")
-        for node in rows:
-            a = node if getattr(node, "name", None) == "a" else node.find("a")
-            if not a or not a.get("href"): continue
+        rows = soup.select("table tr")
+        for tr in rows:
+            a = tr.find("a")
+            if not a or not a.get("href"):
+                continue
             title = a.get_text(" ", strip=True)
+            if not title:
+                continue
             url = urljoin(self.BASE, a.get("href").strip())
-            # 过滤非本站
+            # 只保留站内链接
             host = urlparse(url).netloc.lower()
-            if not host.endswith("mohrss.gov.cn"): continue
-            # 时间
-            dt_txt = ""
-            for sel in ["td:last-child", "em", "span", ".date", ".time"]:
-                sub = node.select_one(sel)
-                if sub:
-                    dt_txt = sub.get_text(" ", strip=True); break
-            if not dt_txt:
-                dt_txt = node.get_text(" ", strip=True)
+            if not host.endswith("mohrss.gov.cn"):
+                continue
+            tds = tr.find_all("td")
+            dt_txt = tds[-1].get_text(" ", strip=True) if len(tds) >= 2 else tr.get_text(" ", strip=True)
             dt = parse_dt(dt_txt)
+            if not dt:
+                dt = fetch_detail_dt(self.session, url, delay=self.delay)
             items.append(Item(title=title, url=url, dt=dt, content="", source="公共招聘网·资讯"))
-        if items:
-            return items
 
-        # 兜底：全页 a + 邻近日期
-        for a in soup.select("a"):
-            if not a.get("href"): continue
-            title = a.get_text(" ", strip=True)
-            if not title: continue
-            url = urljoin(self.BASE, a.get("href").strip())
-            host = urlparse(url).netloc.lower()
-            if not host.endswith("mohrss.gov.cn"): continue
-            txt = (a.parent.get_text(" ", strip=True) if a.parent else title)
-            dt = parse_dt(txt)
-            if dt:
+        # 兜底：若 table 解析不到，用 a+邻近文字
+        if not items:
+            for a in soup.select("a"):
+                href = a.get("href")
+                if not href:
+                    continue
+                title = a.get_text(" ", strip=True)
+                if not title:
+                    continue
+                url = urljoin(self.BASE, href.strip())
+                host = urlparse(url).netloc.lower()
+                if not host.endswith("mohrss.gov.cn"):
+                    continue
+                txt = a.parent.get_text(" ", strip=True) if a.parent else title
+                dt = parse_dt(txt) or fetch_detail_dt(self.session, url, delay=self.delay)
                 items.append(Item(title=title, url=url, dt=dt, content="", source="公共招聘网·资讯"))
+
         return items
 
     def run(self, pages: int) -> List[Item]:
@@ -326,13 +343,13 @@ class JobZxss:
         for p in range(1, pages + 1):
             url = self._page_url(p)
             html = self._fetch(url)
-            items = self.parse_list(html)
-            if not items and p == 1:
+            part = self.parse_list(html)
+            if not part and p == 1:
                 break
-            all_items.extend(items)
+            all_items.extend(part)
         return all_items
 
-# ------------ 汇总/输出 ------------
+# ===================== 汇总/过滤/输出 =====================
 def dedup_by_url(items: List[Item]) -> List[Item]:
     seen = set(); out: List[Item] = []
     for it in items:
@@ -341,8 +358,14 @@ def dedup_by_url(items: List[Item]) -> List[Item]:
             out.append(it)
     return out
 
-def filter_by_range(items: List[Item], start: datetime, end: datetime) -> List[Item]:
-    return [it for it in items if it.dt and start <= it.dt <= end]
+def filter_by_range(items: List[Item], start: datetime, end: datetime, allow_nodate: bool) -> List[Item]:
+    out: List[Item] = []
+    for it in items:
+        if it.dt and (start <= it.dt <= end):
+            out.append(it)
+        elif allow_nodate and not it.dt:
+            out.append(it)
+    return out
 
 def build_markdown(items: List[Item], title_prefix: str) -> str:
     now_dt = datetime.now(TZ)
@@ -369,9 +392,9 @@ def build_markdown(items: List[Item], title_prefix: str) -> str:
         lines.append("")
     return "\n".join(lines)
 
-# ------------ 主流程 ------------
+# ===================== 主流程 =====================
 def main():
-    ap = argparse.ArgumentParser(description="人社部人社新闻 + 公共招聘网资讯（固定栏目，无关键词）→ 钉钉推送")
+    ap = argparse.ArgumentParser(description="人社部地方动态 + 公共招聘网资讯（固定栏目，无关键词）→ 钉钉推送")
     ap.add_argument("--pages", type=int, default=int(os.getenv("PAGES", "2")), help="每站翻页数（默认2）")
     ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY", "0.8")), help="请求间隔秒（默认0.8）")
     ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "50")), help="展示上限（默认50）")
@@ -382,41 +405,57 @@ def main():
                     help="周一合并天数（默认3）")
     ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "48")),
                     help="当不启用自动范围时使用的滚动窗口小时数（默认48）")
+    ap.add_argument("--allow-nodate", action="store_true", help="允许无时间条目也展示（不做时间过滤）")
     ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
     args = ap.parse_args()
 
     session = make_session()
 
-    a = RsxwMohrss(session, delay=args.delay).run(args.pages)
-    b = JobZxss(session, delay=args.delay).run(args.pages)
+    # 人社部（支持多个栏目 URL）
+    mohrss_items: List[Item] = []
+    for url in MOHRSS_SECTIONS:
+        mohr = MohrssList(session, url, delay=args.delay)
+        mohrss_items.extend(mohr.run(args.pages))
 
-    all_items = dedup_by_url(a + b)
+    # 公共招聘网
+    job = JobZxss(session, delay=args.delay)
+    job_items = job.run(args.pages)
+
+    all_items = dedup_by_url(mohrss_items + job_items)
 
     # 时间范围
+    allow_nodate = args.allow_nodate or os.getenv("ALLOW_NODATE","").lower()=="true"
     title_prefix = "早安资讯"
     if args.date:
         start, end = day_range(args.date)
         title_prefix = f"{args.date} 专题"
-        all_items = filter_by_range(all_items, start, end)
+        all_items = filter_by_range(all_items, start, end, allow_nodate)
     elif args.auto_range:
         start, end, tp = auto_range(args.days_for_monday)
         title_prefix = tp
-        all_items = filter_by_range(all_items, start, end)
+        all_items = filter_by_range(all_items, start, end, allow_nodate)
     else:
-        # 兜底：滚动窗口
         now = datetime.now(TZ)
         start = now - timedelta(hours=args.window_hours)
         end = now
-        all_items = filter_by_range(all_items, start, end)
+        title_prefix = f"近{args.window_hours}小时"
+        all_items = filter_by_range(all_items, start, end, allow_nodate)
 
     # 排序 + 截断
     all_items.sort(key=lambda x: x.dt or datetime(1970,1,1,tzinfo=TZ), reverse=True)
     show = all_items[:args.limit] if args.limit and args.limit > 0 else all_items
 
-    print(f"✅ 原始抓取 {len(a)+len(b)} 条；去重后 {len(all_items)} 条；展示 {len(show)} 条。")
+    print(f"✅ 原始抓取 {len(mohrss_items)+len(job_items)} 条；去重后 {len(all_items)} 条；展示 {len(show)} 条。")
     md = build_markdown(show, title_prefix)
     print("\n--- Markdown Preview ---\n")
     print(md)
+
+    # 落盘，便于上传 artifacts 查看
+    try:
+        with open("hr_news.md", "w", encoding="utf-8") as f:
+            f.write(md)
+    except Exception as e:
+        print("write md error:", e)
 
     if not args.no_push:
         ok = send_dingtalk_markdown(f"{title_prefix}｜人社部&公共招聘网（固定栏目）", md)
