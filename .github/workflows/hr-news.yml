@@ -3,7 +3,8 @@ name: "HR News (Fixed Sections, No Keywords)"
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 1 * * *"  # 每天 09:15 CST (UTC+8)
+    # GitHub Actions 使用 UTC，这里设为每天 23:30 UTC = 北京时间次日 07:30
+    - cron: "30 23 * * *"
 
 jobs:
   run:
@@ -24,34 +25,41 @@ jobs:
 
       - name: Run HR news
         env:
-          # —— 自动范围：非周一=昨天；周一=近 N 天 ——
+          # —— 时间策略：脚本内部已固定“抓昨天” —— 
           AUTO_RANGE: "true"
-          DAYS_FOR_MONDAY: "3"
 
-          # —— 抓取参数 ——
+          # —— 抓取参数 —— 
           PAGES: "3"
           LIMIT: "60"
           DELAY: "0.8"
 
-          # —— 若想放宽窗口试跑，可改：
+          # —— 非 auto-range 时的回落窗口（可选）——
           # AUTO_RANGE: "false"
           # WINDOW_HOURS: "168"
 
-          # —— 允许无时间也展示，避免因为解析不到时间而全空 ——
+          # —— 允许无时间也展示，避免解析不到时间导致空列表 —— 
           ALLOW_NODATE: "true"
 
-          # —— 钉钉（带 A 的 Secrets 名）——
+          # —— 钉钉（A 版 Secrets）——
           DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOKA }}
           DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRETA }}
 
           NO_PUSH: "false"
         run: |
+          # 关闭代理，避免被 runner 环境干扰
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
           set -e
+
+          echo "[Info] Python: $(python --version)"
+          echo "[Info] Now (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "[Info] Target push window: 07:30 (Asia/Shanghai)"
+
           ls -la
+
           CMD="python hr_news_auto_range.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
           if [ "${AUTO_RANGE}" = "true" ]; then
-            CMD="${CMD} --auto-range --days-for-monday \"${DAYS_FOR_MONDAY}\""
+            # 按脚本逻辑：恒定“抓昨天”，无需额外参数
+            CMD="${CMD} --auto-range"
           else
             CMD="${CMD} --window-hours \"${WINDOW_HOURS:-48}\""
           fi
@@ -61,6 +69,7 @@ jobs:
           if [ "${NO_PUSH}" = "true" ]; then
             CMD="${CMD} --no-push"
           fi
+
           echo "[Run] ${CMD}"
           eval ${CMD} | tee hr_news.log
 
