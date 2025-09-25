@@ -2,22 +2,20 @@
 """
 hr_news_auto_range.py
 
-◆ 抓取来源（固定栏目、无关键词）：
-  1) 人社部新闻/动态：
-     - 部内要闻（buneiyaowen）
-     - 人社新闻（rsxw）
-     - 地方动态（dfdt）
-     ☆ 只接受列表页能直接取到的日期（YYYY-MM-DD），无日期丢弃
-  2) 中国公共招聘网（zxss）：仅主列表 li，右侧日期（YYYY-MM-DD），无日期丢弃
+◆ 固定来源（无关键词）：
+  1) 人社部新闻/动态：部内要闻（buneiyaowen）/ 人社新闻（rsxw）/ 地方动态（dfdt）
+     - 逐条以列表容器抓取：标题 + 链接 + 日期（YYYY-MM-DD）
+     - 只接受“列表页可见日期”，无日期丢弃
+  2) 中国公共招聘网：资讯首页主列表（右侧日期）
 
 ◆ 时间策略：
-  - 恒定“抓昨天（Asia/Shanghai）” 00:00~23:59:59
-  - 也支持 --date 指定日期（yesterday / YYYY-MM-DD）
-  - 若关闭 --auto-range，则使用 --window-hours 滚动窗口（默认 48h）
+  - 默认“抓昨天（Asia/Shanghai）” 00:00~23:59:59
+  - 也支持 --date 指定（yesterday / YYYY-MM-DD）
+  - 关闭 --auto-range 时可用 --window-hours 滚动窗口
 
 ◆ 输出：
-  - Markdown（标题、来源、日期、URL）
-  - 可选钉钉 Markdown 推送（使用带 A 的环境变量名）
+  - Markdown 到 stdout 与 hr_news.md
+  - 可选钉钉 Markdown 推送（DINGTALK_WEBHOOKA / DINGTALK_SECRETA）
 
 依赖：
   pip install requests beautifulsoup4 urllib3
@@ -45,23 +43,23 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/123.0.0.0 Safari/537.36")
 
-# —— 人社部栏目（按需增删）——
+# —— 人社部栏目 ——
 MOHRSS_BNYW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/"  # 部内要闻
 MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/rsxw/"        # 人社新闻
 MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"        # 地方动态
 MOHRSS_SECTIONS = [MOHRSS_BNYW, MOHRSS_RSXW, MOHRSS_DFDT]
 
-# —— 公共招聘网 ——（主列表）
+# —— 公共招聘网（主列表） ——
 JOB_ZXSS = "http://job.mohrss.gov.cn/zxss/index.jhtml"
 
-# —— 强制“必须有日期”（列表页即可取得）——
+# —— 强制：必须有日期（列表页可见） ——
 REQUIRE_DATE_MOHRSS = True
 REQUIRE_DATE_JOB = True
 
-# —— Debug 开关（打印解析统计）——
-DEBUG = os.getenv("DEBUG", "").lower() in ("1","true","yes","on")
+# —— Debug 输出开关 ——
+DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
 
-# —— 钉钉（A 变量名；可用 Secrets 覆盖）——
+# —— 钉钉（A 版变量名；可被环境覆盖） ——
 DEFAULT_WEBHOOK = (
     "https://oapi.dingtalk.com/robot/send?"
     "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
@@ -92,7 +90,7 @@ def make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.trust_env = False  # 避免 runner 代理干扰
+    s.trust_env = False
     return s
 
 # ===================== DingTalk 推送 =====================
@@ -185,50 +183,34 @@ class MohrssList:
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
-        # === 方案一：通用“行块”解析（标题 <a> + 同块或近邻中的 YYYY-MM-DD）===
-        # 适配你截图中的：serviceMainListTxt / serviceMainListCon 等结构
-        line_blocks = []
-        selectors = [
-            "div.serviceMainListTxt", "div.serviceMainListCon",
-            "div.serviceMainList", "div.organGeneralNewListTxtConTime",
-            "div.list", "div.listCon",
-            "div[class*='list']", "div[class*='List']",
-            "li", "tr"
-        ]
-        for sel in selectors:
-            line_blocks.extend(soup.select(sel))
-
-        seen = set()
-        for blk in line_blocks:
-            a = blk.find("a", href=True)
+        # —— 精准容器：一条新闻在 div.serviceMainListTxtCon 中 ——
+        cards = soup.select("div.serviceMainListTxtCon")
+        for card in cards:
+            a = card.select_one(".serviceMainListTxtLink a[href]")
             if not a:
                 continue
             title = a.get_text(" ", strip=True)
             if not title:
                 continue
             url = urljoin(self.BASE, a["href"].strip())
-            if url in seen:
-                continue
 
-            neighbor_texts = [blk.get_text(" ", strip=True)]
-            if blk.parent:
-                neighbor_texts.append(blk.parent.get_text(" ", strip=True))
-            big_text = "  ".join(neighbor_texts)
-            m = re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})(?:\s+\d{1,2}:\d{1,2})?", big_text)
-            dt = None
-            if m:
-                y, mo, d = map(int, m.groups()[:3])
-                dt = datetime(y, mo, d, 12, 0, tzinfo=TZ)
+            # 日期：优先两个固定位置，其次容器内任意 YYYY-MM-DD
+            date_el = card.select_one(".organMenuTxtLink") or card.select_one(".organGeneralNewListTxtConTime")
+            dt_txt = date_el.get_text(" ", strip=True) if date_el else ""
+            if not dt_txt:
+                m_any = re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})", card.get_text(" ", strip=True))
+                dt_txt = m_any.group(0) if m_any else ""
 
+            dt = parse_dt(dt_txt)
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
+
             items.append(Item(title=title, url=url, dt=dt, content="", source="人社部"))
-            seen.add(url)
 
         if items:
             return items
 
-        # === 方案二：table 结构兜底 ===
+        # —— 兜底：table 结构 ——
         rows = soup.select("table tr")
         for tr in rows:
             a = tr.find("a", href=True)
@@ -248,7 +230,7 @@ class MohrssList:
         if items:
             return items
 
-        # === 方案三：ul/li 结构兜底 ===
+        # —— 兜底：ul/li 结构 ——
         lis = soup.select("ul li")
         for li in lis:
             a = li.find("a", href=True)
@@ -308,10 +290,8 @@ class JobZxss:
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
-        # 仅主列表（避免“热门/最新文章”混入）
         lis = soup.select("div.zp-listnavbox ul li")
         if not lis:
-            # 宽松兜底：任何 li 中出现右侧日期 span 的
             lis = [li for li in soup.select("ul li")
                    if li.find("span", class_=re.compile(r"floatright.*gray"))]
 
@@ -327,7 +307,6 @@ class JobZxss:
             if not host.endswith("mohrss.gov.cn"):
                 continue
 
-            # 右侧日期
             span = li.find("span", class_=re.compile(r"floatright.*gray"))
             dt_txt = span.get_text(" ", strip=True) if span else ""
             dt = parse_dt(dt_txt)
@@ -387,7 +366,7 @@ def main():
     ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "50")), help="展示上限（默认50）")
     ap.add_argument("--date", default=os.getenv("DATE", ""), help="指定日期（yesterday/2025-09-24）；为空启用 --auto-range")
     ap.add_argument("--auto-range", default=os.getenv("AUTO_RANGE", "true").lower()=="true",
-                    action="store_true", help="启用自动范围（默认开，恒定昨天）")
+                    action="store_true", help="启用自动范围（默认‘昨天’）")
     ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "48")),
                     help="当不启用自动范围时使用滚动窗口小时数（默认48）")
     ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
