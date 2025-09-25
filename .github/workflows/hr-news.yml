@@ -33,13 +33,6 @@ jobs:
           LIMIT: "60"
           DELAY: "0.8"
 
-          # —— 非 auto-range 时的回落窗口（可选）——
-          # AUTO_RANGE: "false"
-          # WINDOW_HOURS: "168"
-
-          # —— 允许无时间也展示，避免解析不到时间导致空列表 —— 
-          ALLOW_NODATE: "true"
-
           # —— 钉钉（A 版 Secrets）——
           DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOKA }}
           DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRETA }}
@@ -62,9 +55,6 @@ jobs:
             CMD="${CMD} --auto-range"
           else
             CMD="${CMD} --window-hours \"${WINDOW_HOURS:-48}\""
-          fi
-          if [ "${ALLOW_NODATE}" = "true" ]; then
-            CMD="${CMD} --allow-nodate"
           fi
           if [ "${NO_PUSH}" = "true" ]; then
             CMD="${CMD} --no-push"
