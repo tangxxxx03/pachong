@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-hr_news_auto_range.py  （完整版 · 修复“抓不到”）
+hr_news_detail_first.py  （全新方案：详情页取发布时间）
+目标站点（固定来源）：
+  1) 人社部新闻/动态：部内要闻 / 人社新闻 / 地方动态
+  2) 中国公共招聘网：资讯首页主列表
 
-关键改动：
-1) parse_dt_smart：兼容 YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD / YYYY年MM月DD日 /
-   MM-DD / MM/DD / MM.DD / M月D日（可带 HH:MM）；无年份 → 结合 ref_date.year 补全年份，
-   若补今年后落在未来则回退一年（解决跨年列表）。
-2) “昨日兜底”：若仍未解析到日期且处于“昨日专辑”模式（传入 ref_date=昨日），
-   临时赋值为“昨日 12:00”，避免被时间窗口全部刷掉。
-3) 选择器做了轻量兜底；其余逻辑保持不变。
+核心思路：
+- 列表页只负责“发现链接”；真实发布时间从“详情页”解析（正文时间、meta、URL、Last-Modified 多重兜底）。
+- 时间过滤优先使用 --window-hours（默认 48 小时）；也支持 --date=yesterday 做“昨日专辑”。
+- 彻底规避列表页日期缺失/格式五花八门导致的“全被刷掉”。
 
 依赖：
   pip install requests beautifulsoup4 urllib3
@@ -16,7 +16,7 @@ hr_news_auto_range.py  （完整版 · 修复“抓不到”）
 
 import os, re, time, hmac, base64, hashlib, argparse
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Iterable
 from urllib.parse import urljoin, urlparse, quote
 from datetime import datetime, timedelta
 
@@ -30,29 +30,21 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
-# ===================== 全局配置 =====================
+# =============== 全局配置 ===============
 TZ = ZoneInfo("Asia/Shanghai")
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/123.0.0.0 Safari/537.36")
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 
-# —— 人社部栏目 ——
-MOHRSS_BNYW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/"  # 部内要闻
-MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/rsxw/"        # 人社新闻
-MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"        # 地方动态
+MOHRSS_BNYW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/"
+MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/rsxw/"
+MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"
 MOHRSS_SECTIONS = [MOHRSS_BNYW, MOHRSS_RSXW, MOHRSS_DFDT]
 
-# —— 公共招聘网（主列表） ——
 JOB_ZXSS = "http://job.mohrss.gov.cn/zxss/index.jhtml"
 
-# —— 强制：必须有日期（列表页可见） ——
-REQUIRE_DATE_MOHRSS = True
-REQUIRE_DATE_JOB = True
-
-# —— Debug 输出开关 ——
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
 
-# —— 钉钉（A 版变量名；可被环境覆盖） ——
+# 钉钉（A版变量名，也接受默认值）
 DEFAULT_WEBHOOK = (
     "https://oapi.dingtalk.com/robot/send?"
     "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
@@ -69,7 +61,7 @@ def _first_env(*keys: str, default: str = "") -> str:
 DINGTALK_WEBHOOK = _first_env("DINGTALK_WEBHOOKA", "DINGTALK_BASEA", "WEBHOOKA", default=DEFAULT_WEBHOOK)
 DINGTALK_SECRET  = _first_env("DINGTALK_SECRETA",  "SECRETA",        default=DEFAULT_SECRET)
 
-# ===================== HTTP 工具 =====================
+# =============== HTTP 工具 ===============
 def make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update({
@@ -81,7 +73,7 @@ def make_session() -> requests.Session:
         total=3,
         backoff_factor=0.6,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
+        allowed_methods=frozenset(["GET", "HEAD"]),
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
@@ -90,7 +82,7 @@ def make_session() -> requests.Session:
     s.trust_env = False
     return s
 
-# ===================== DingTalk 推送 =====================
+# =============== DingTalk ===============
 def _sign_webhook(base_webhook: str, secret: str) -> str:
     if not base_webhook:
         return ""
@@ -108,69 +100,56 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
     if not webhook:
         print("🔕 未配置钉钉 Webhook，跳过推送。")
         return False
-    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": md_text}}
     try:
-        r = requests.post(webhook, json=payload, timeout=20)
-        ok = (r.status_code == 200 and isinstance(r.json(), dict) and r.json().get("errcode") == 0)
-        print("DingTalk resp:", r.status_code, r.text[:200])
+        r = requests.post(webhook, json={"msgtype":"markdown","markdown":{"title":title,"text":md_text}}, timeout=20)
+        ok = (r.status_code == 200 and r.json().get("errcode") == 0)
+        if DEBUG:
+            print("DingTalk resp:", r.status_code, r.text[:200])
         return ok
     except Exception as e:
         print("DingTalk error:", e)
         return False
 
-# ===================== 时间解析 =====================
-def parse_dt_smart(text: str, *, tz=TZ, ref_date=None) -> Optional[datetime]:
-    """
-    兼容：
-      - YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
-      - YYYY年MM月DD日
-      - MM-DD / MM/DD / MM.DD
-      - M月D日 / MM月DD日
-      - 可选 HH:MM
-    无年份 → 用 ref_date.year（若落在未来 → 回退一年）
-    """
+# =============== 时间工具 ===============
+DATE_PATTS = [
+    r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\s*(\d{1,2}):(\d{1,2})",
+    r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})",
+    r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{1,2})",
+    r"(\d{4})年(\d{1,2})月(\d{1,2})日",
+]
+MONTHDAY_PATTS = [
+    r"(\d{1,2})[-/.](\d{1,2})",
+    r"(\d{1,2})月(\d{1,2})日",
+]
+
+def build_dt(y:int, m:int, d:int, hh:int=12, mm:int=0) -> datetime:
+    return datetime(y, m, d, hh, mm, tzinfo=TZ)
+
+def parse_any_datetime(text: str, *, ref_date: Optional[datetime]=None) -> Optional[datetime]:
     if not text:
         return None
     s = re.sub(r"\s+", " ", text.strip())
-
-    # 1) 带年（- / . / /）
-    m = re.search(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
-    if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        hh, mm = (int(m.group(4)), int(m.group(5))) if m.group(4) and m.group(5) else (12, 0)
-        return datetime(y, mo, d, hh, mm, tzinfo=tz)
-
-    # 2) 带年（中文：YYYY年MM月DD日）
-    m = re.search(r"^(\d{4})年(\d{1,2})月(\d{1,2})日(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
-    if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        hh, mm = (int(m.group(4)), int(m.group(5))) if m.group(4) and m.group(5) else (12, 0)
-        return datetime(y, mo, d, hh, mm, tzinfo=tz)
-
-    # 3) 只有月日（- / . / /）
-    m = re.search(r"^(\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
-    if m:
-        mo, d = int(m.group(1)), int(m.group(2))
-        hh, mm = (int(m.group(3)), int(m.group(4))) if m.group(3) and m.group(4) else (12, 0)
-        base = datetime.now(tz).date() if ref_date is None else ref_date
-        y = base.year
-        cand = datetime(y, mo, d, hh, mm, tzinfo=tz)
-        if cand.date() > base:  # 跨年回退
-            cand = datetime(y - 1, mo, d, hh, mm, tzinfo=tz)
-        return cand
-
-    # 4) 只有月日（中文：M月D日）
-    m = re.search(r"^(\d{1,2})月(\d{1,2})日(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
-    if m:
-        mo, d = int(m.group(1)), int(m.group(2))
-        hh, mm = (int(m.group(3)), int(m.group(4))) if m.group(3) and m.group(4) else (12, 0)
-        base = datetime.now(tz).date() if ref_date is None else ref_date
-        y = base.year
-        cand = datetime(y, mo, d, hh, mm, tzinfo=tz)
-        if cand.date() > base:
-            cand = datetime(y - 1, mo, d, hh, mm, tzinfo=tz)
-        return cand
-
+    # 带年
+    for p in DATE_PATTS:
+        m = re.search(p, s)
+        if m:
+            g = [int(x) for x in m.groups() if x]
+            if len(g) == 5:
+                y, mo, d, hh, mm = g
+                return build_dt(y, mo, d, hh, mm)
+            elif len(g) == 3:
+                y, mo, d = g
+                return build_dt(y, mo, d)
+    # 月日
+    base = (ref_date or datetime.now(TZ))
+    for p in MONTHDAY_PATTS:
+        m = re.search(p, s)
+        if m:
+            mo, d = int(m.group(1)), int(m.group(2))
+            cand = build_dt(base.year, mo, d)
+            if cand > base:
+                cand = build_dt(base.year - 1, mo, d)
+            return cand
     return None
 
 def day_range(date_str: str) -> Tuple[datetime, datetime]:
@@ -178,235 +157,151 @@ def day_range(date_str: str) -> Tuple[datetime, datetime]:
         base = datetime.now(TZ).date() - timedelta(days=1)
     else:
         base = datetime.strptime(date_str, "%Y-%m-%d").date()
-    start = datetime(base.year, base.month, base.day, 0, 0, 0, tzinfo=TZ)
-    end   = datetime(base.year, base.month, base.day, 23, 59, 59, tzinfo=TZ)
-    return start, end
+    return (datetime(base.year, base.month, base.day, 0,0,0, tzinfo=TZ),
+            datetime(base.year, base.month, base.day, 23,59,59, tzinfo=TZ))
 
-def auto_range() -> Tuple[datetime, datetime, str]:
-    start, end = day_range("yesterday")
-    return start, end, "昨日专辑"
-
-# ===================== 数据结构 =====================
+# =============== 数据结构 ===============
 @dataclass
 class Item:
     title: str
     url: str
     dt: Optional[datetime]
-    content: str
     source: str
 
-# ===================== 站点 1：人社部 =====================
-class MohrssList:
-    BASE = "https://www.mohrss.gov.cn"
+# =============== 解析器（详情优先） ===============
+def discover_links_from_mohrss_list(html: str, base: str) -> Iterable[Tuple[str,str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    # 这些容器里一般就是新闻列表
+    containers = soup.select("div.serviceMainListTxtCon, ul, table")
+    seen = set()
+    for root in containers:
+        for a in root.find_all("a", href=True):
+            href = a["href"].strip()
+            if any(x in href for x in ("javascript:", "#")):
+                continue
+            url = urljoin(base, href)
+            if url in seen: 
+                continue
+            seen.add(url)
+            title = a.get_text(" ", strip=True)
+            if title:
+                yield title, url
 
-    def __init__(self, session: requests.Session, list_url: str, delay: float = 1.0, ref_date=None):
-        self.session = session
-        self.list_url = list_url
-        self.delay = delay
-        self.ref_date = ref_date  # date
+def discover_links_from_job_list(html: str, base: str) -> Iterable[Tuple[str,str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    seen = set()
+    # 主列表
+    for li in soup.select("div.zp-listnavbox ul li"):
+        a = li.find("a", href=True)
+        if not a: 
+            continue
+        url = urljoin(base, a["href"].strip())
+        if url in seen: 
+            continue
+        seen.add(url)
+        title = a.get_text(" ", strip=True)
+        if title:
+            yield title, url
 
-    def _fetch(self, url: str) -> str:
-        r = self.session.get(url, timeout=20)
+def extract_publish_dt_from_detail(html: str, url: str) -> Optional[datetime]:
+    soup = BeautifulSoup(html, "html.parser")
+    text_blocks = []
+
+    # 1) 直接看常见时间节点
+    cand_nodes = soup.select("time, .time, .date, .pubtime, .publish-time, .source, .info, .article-info, .xxgk-info")
+    for n in cand_nodes:
+        text_blocks.append(n.get_text(" ", strip=True))
+
+    # 2) meta
+    for sel in ["meta[name='PubDate']", "meta[name='publishdate']", "meta[property='article:published_time']",
+                "meta[name='weibo: article:create_at']", "meta[name='releaseDate']"]:
+        m = soup.select_one(sel)
+        if m and m.get("content"):
+            text_blocks.append(m["content"])
+
+    # 3) 标题栏/正文首段
+    header = soup.select_one("h1, .title, .articleTitle")
+    if header:
+        text_blocks.append(header.get_text(" ", strip=True))
+    body = soup.select_one("article, .article, .TRS_Editor, .content, #content")
+    if body:
+        text_blocks.append(body.get_text(" ", strip=True)[:400])  # 取前一段
+
+    # 4) URL 中的日期
+    url_txt = url
+    text_blocks.append(url_txt.replace("/", " ").replace("_", " "))
+
+    # 5) 响应头（Last-Modified）会在 fetch 时传入（由外层补）
+    # 这里只留钩子：如果上层传了，会加到 blocks 里
+    # -> 通过返回 None 让上层兜底处理
+
+    # 统一拼成一个大字符串去匹配
+    big = " | ".join([t for t in text_blocks if t])
+    dt = parse_any_datetime(big, ref_date=datetime.now(TZ))
+    return dt
+
+# =============== 抓取主流程（详情优先） ===============
+def fetch_list_and_details(session: requests.Session, list_url: str, pages: int, base: str, site: str,
+                           discover_fn) -> List[Item]:
+    items: List[Item] = []
+    for p in range(1, pages + 1):
+        # 翻页：人社部 index_{p}.html；公共招聘网 ?pageNo=p
+        if "mohrss.gov.cn" in list_url:
+            url = list_url if p == 1 else urljoin(list_url, f"index_{p}.html")
+        else:
+            if p == 1: url = list_url
+            else:
+                sep = "&" if "?" in list_url else "?"
+                url = list_url + f"{sep}pageNo={p}"
+
+        r = session.get(url, timeout=20)
         r.encoding = r.apparent_encoding or "utf-8"
-        time.sleep(self.delay)
-        return r.text
+        html = r.text
 
-    def _page_url(self, page: int) -> str:
-        if page <= 1:
-            return self.list_url
-        tail = "" if self.list_url.endswith("/") else "/"
-        return urljoin(self.list_url, f"{tail}index_{page}.html")
+        if DEBUG: print(f"[DEBUG] list {site} p{p} len={len(html)}")
 
-    def parse_list(self, html: str) -> List[Item]:
-        soup = BeautifulSoup(html, "html.parser")
-        items: List[Item] = []
+        for title, link in discover_fn(html, base):
+            # 详情页
+            try:
+                rr = session.get(link, timeout=20, headers={"Referer": url})
+                rr.encoding = rr.apparent_encoding or "utf-8"
+                dt = extract_publish_dt_from_detail(rr.text, link)
 
-        # —— 常见容器：div.serviceMainListTxtCon ——
-        cards = soup.select("div.serviceMainListTxtCon")
-        for card in cards:
-            a = card.select_one(".serviceMainListTxtLink a[href]") or card.select_one("a[href]")
-            if not a:
+                # 兜底：Last-Modified
+                if not dt:
+                    lm = rr.headers.get("Last-Modified", "") or rr.headers.get("last-modified","")
+                    if lm:
+                        try:
+                            dt = datetime.fromtimestamp(time.mktime(time.strptime(lm, "%a, %d %b %Y %H:%M:%S %Z")), tz=TZ)
+                        except Exception:
+                            pass
+
+                items.append(Item(title=title, url=link, dt=dt, source=site))
+                time.sleep(0.5)
+            except Exception as e:
+                if DEBUG: print("[DEBUG] detail error:", e)
                 continue
-            title = a.get_text(" ", strip=True)
-            if not title:
-                continue
-            url = urljoin(self.BASE, a["href"].strip())
+    return items
 
-            # 日期：尝试多个位置 + 文本兜底
-            date_el = (card.select_one(".organMenuTxtLink")
-                       or card.select_one(".organGeneralNewListTxtConTime")
-                       or card.select_one(".time") or card.select_one(".date"))
-            dt_txt = date_el.get_text(" ", strip=True) if date_el else ""
-            if not dt_txt:
-                # 从整段文本里兜底抓一个“带年或月日”的片段
-                m_any = re.search(r"(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2}[-/.]\d{1,2})|(\d{1,2}月\d{1,2}日)", card.get_text(" ", strip=True))
-                if m_any:
-                    dt_txt = m_any.group(0)
-
-            # —— 解析 + 昨日兜底 ——
-            dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
-            if not dt and self.ref_date is not None:
-                try:
-                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
-                except Exception:
-                    dt = None
-            if REQUIRE_DATE_MOHRSS and not dt:
-                continue
-
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部"))
-
-        if items:
-            return items
-
-        # —— 兜底：table 结构 ——
-        rows = soup.select("table tr")
-        for tr in rows:
-            a = tr.find("a", href=True)
-            if not a:
-                continue
-            title = a.get_text(" ", strip=True)
-            if not title:
-                continue
-            url = urljoin(self.BASE, a["href"].strip())
-            tds = tr.find_all("td")
-            dt_txt = tds[-1].get_text(" ", strip=True) if len(tds) >= 2 else tr.get_text(" ", strip=True)
-
-            dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
-            if not dt and self.ref_date is not None:
-                try:
-                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
-                except Exception:
-                    dt = None
-            if REQUIRE_DATE_MOHRSS and not dt:
-                continue
-
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(table)"))
-
-        if items:
-            return items
-
-        # —— 兜底：ul/li 结构 ——
-        lis = soup.select("ul li")
-        for li in lis:
-            a = li.find("a", href=True)
-            if not a:
-                continue
-            title = a.get_text(" ", strip=True)
-            if not title:
-                continue
-            url = urljoin(self.BASE, a["href"].strip())
-            dt_txt = ""
-            for sel in ["span", "em", ".date", ".time"]:
-                node = li.select_one(sel)
-                if node:
-                    dt_txt = node.get_text(" ", strip=True); break
-            if not dt_txt:
-                dt_txt = li.get_text(" ", strip=True)
-
-            dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
-            if not dt and self.ref_date is not None:
-                try:
-                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
-                except Exception:
-                    dt = None
-            if REQUIRE_DATE_MOHRSS and not dt:
-                continue
-
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(ul)"))
-
-        return items
-
-    def run(self, pages: int) -> List[Item]:
-        all_items: List[Item] = []
-        for p in range(1, pages + 1):
-            url = self._page_url(p)
-            html = self._fetch(url)
-            part = self.parse_list(html)
-            if not part and p == 1:
-                break
-            all_items.extend(part)
-        return all_items
-
-# ===================== 站点 2：公共招聘网（主列表+右侧日期） =====================
-class JobZxss:
-    BASE = "http://job.mohrss.gov.cn"
-    LIST = JOB_ZXSS
-
-    def __init__(self, session: requests.Session, delay: float = 1.0, ref_date=None):
-        self.session = session
-        self.delay = delay
-        self.ref_date = ref_date  # date
-
-    def _fetch(self, url: str) -> str:
-        r = self.session.get(url, timeout=20)
-        r.encoding = r.apparent_encoding or "utf-8"
-        time.sleep(self.delay)
-        return r.text
-
-    def _page_url(self, page: int) -> str:
-        if page <= 1:
-            return self.LIST
-        sep = "&" if "?" in self.LIST else "?"
-        return self.LIST + f"{sep}pageNo={page}"
-
-    def parse_list(self, html: str) -> List[Item]:
-        soup = BeautifulSoup(html, "html.parser")
-        items: List[Item] = []
-
-        lis = soup.select("div.zp-listnavbox ul li")
-        if not lis:
-            lis = [li for li in soup.select("ul li")
-                   if li.find("span", class_=re.compile(r"floatright.*gray"))]
-
-        for li in lis:
-            a = li.find("a", href=True)
-            if not a:
-                continue
-            title = a.get_text(" ", strip=True)
-            if not title:
-                continue
-            url = urljoin(self.BASE, a["href"].strip())
-            host = urlparse(url).netloc.lower()
-            if not host.endswith("mohrss.gov.cn"):
-                continue
-
-            span = li.find("span", class_=re.compile(r"floatright.*gray"))
-            dt_txt = span.get_text(" ", strip=True) if span else ""
-
-            dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
-            if not dt and self.ref_date is not None:
-                try:
-                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
-                except Exception:
-                    dt = None
-            if REQUIRE_DATE_JOB and not dt:
-                continue
-
-            items.append(Item(title=title, url=url, dt=dt, content="", source="公共招聘网·资讯"))
-        return items
-
-    def run(self, pages: int) -> List[Item]:
-        all_items: List[Item] = []
-        for p in range(1, pages + 1):
-            url = self._page_url(p)
-            html = self._fetch(url)
-            part = self.parse_list(html)
-            if not part and p == 1:
-                break
-            all_items.extend(part)
-        return all_items
-
-# ===================== 汇总/过滤/输出 =====================
-def dedup_by_url(items: List[Item]) -> List[Item]:
-    seen = set(); out: List[Item] = []
+def dedup(items: List[Item]) -> List[Item]:
+    seen = set(); out=[]
     for it in items:
-        if it.url and it.url not in seen:
-            seen.add(it.url)
-            out.append(it)
+        k = it.url.split("#")[0]
+        if k in seen: 
+            continue
+        seen.add(k)
+        out.append(it)
     return out
 
-def filter_by_range(items: List[Item], start: datetime, end: datetime) -> List[Item]:
-    return [it for it in items if it.dt and (start <= it.dt <= end)]
+def filter_by_time(items: List[Item], start: datetime, end: datetime, allow_nodate: bool=False) -> List[Item]:
+    kept=[]
+    for it in items:
+        if it.dt:
+            if start <= it.dt <= end:
+                kept.append(it)
+        elif allow_nodate:
+            kept.append(it)
+    return kept
 
 def build_markdown(items: List[Item], title_prefix: str) -> str:
     now_dt = datetime.now(TZ)
@@ -421,84 +316,67 @@ def build_markdown(items: List[Item], title_prefix: str) -> str:
     if not items:
         lines.append("> 暂无更新。")
         return "\n".join(lines)
+
     for i, it in enumerate(items, 1):
-        if it.dt:
-            dt_str = it.dt.strftime("%Y-%m-%d %H:%M") if (it.dt.hour or it.dt.minute) else it.dt.strftime("%Y-%m-%d")
-        else:
-            dt_str = ""
-        lines.append(f"{i}. [{it.title}]({it.url})　—　*{it.source}*　`{dt_str}`")
+        ds = it.dt.strftime("%Y-%m-%d %H:%M") if it.dt else "（时间未知）"
+        lines.append(f"{i}. [{it.title}]({it.url})  —  *{it.source}*  `{ds}`")
         lines.append("")
     return "\n".join(lines)
 
-# ===================== 主流程 =====================
+# =============== CLI ===============
 def main():
-    ap = argparse.ArgumentParser(description="人社部新闻/动态 + 公共招聘网（昨日 & 列表页有日期）→ 钉钉推送")
-    ap.add_argument("--pages", type=int, default=int(os.getenv("PAGES", "2")), help="每站翻页数（默认2）")
-    ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY", "0.8")), help="请求间隔秒（默认0.8）")
-    ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "50")), help="展示上限（默认50）")
-    ap.add_argument("--date", default=os.getenv("DATE", ""), help="指定日期（yesterday/2025-09-24）；为空启用 --auto-range")
-    ap.add_argument("--auto-range", default=os.getenv("AUTO_RANGE", "true").lower()=="true",
-                    action="store_true", help="启用自动范围（默认‘昨天’）")
-    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "48")),
-                    help="当不启用自动范围时使用滚动窗口小时数（默认48）")
-    ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
+    ap = argparse.ArgumentParser(description="人社部 + 公共招聘网（详情优先解析发布时间）→ 钉钉推送")
+    ap.add_argument("--pages", type=int, default=int(os.getenv("PAGES","2")))
+    ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY","0.6")))
+    ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT","50")))
+    ap.add_argument("--date", default=os.getenv("DATE",""), help="yesterday / YYYY-MM-DD")
+    ap.add_argument("--auto-range", default=os.getenv("AUTO_RANGE","").lower()=="true", action="store_true")
+    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS","48")),
+                    help="滚动窗口小时数，默认48；当未设置 --date 且未开启 --auto-range 时生效")
+    ap.add_argument("--allow-nodate", action="store_true", help="允许无日期的条目进入（极端兜底）")
+    ap.add_argument("--no-push", action="store_true")
     args = ap.parse_args()
 
     session = make_session()
 
-    # 时间范围：优先 --date；否则昨日；否则滚动窗口
+    # 时间窗口
     if args.date:
         start, end = day_range(args.date)
         title_prefix = f"{args.date} 专题"
     elif args.auto_range:
-        start, end, title_prefix = auto_range()
+        start, end = day_range("yesterday")
+        title_prefix = "昨日专辑"
     else:
         now = datetime.now(TZ)
-        start = now - timedelta(hours=args.window_hours)
-        end = now
+        start, end = (now - timedelta(hours=args.window_hours)), now
         title_prefix = f"近{args.window_hours}小时"
 
-    # 解析时参考的日期（用于“只有月日”的情况补全年份更稳定）
-    ref_date = start.date()
-
-    # 人社部
+    # —— 抓取（详情优先）
     mohrss_items: List[Item] = []
     for url in MOHRSS_SECTIONS:
-        mohr = MohrssList(session, url, delay=args.delay, ref_date=ref_date)
-        got = mohr.run(args.pages)
-        if DEBUG:
-            print(f"[DEBUG] MOHRSS: {url} → parsed {len(got)} items (before filter)")
-            for x in got[:5]:
-                print(f"        · {(x.dt.strftime('%Y-%m-%d') if x.dt else 'NO-DATE')} | {x.title[:60]}")
+        got = fetch_list_and_details(session, url, args.pages, base="https://www.mohrss.gov.cn", site="人社部",
+                                     discover_fn=discover_links_from_mohrss_list)
+        if DEBUG: print(f"[DEBUG] MOHRSS got {len(got)}")
         mohrss_items.extend(got)
+        time.sleep(args.delay)
 
-    # 公共招聘网
-    job = JobZxss(session, delay=args.delay, ref_date=ref_date)
-    job_items = job.run(args.pages)
-    if DEBUG:
-        print(f"[DEBUG] JOB.ZXSS → parsed {len(job_items)} items (before filter)")
-        for x in job_items[:5]:
-            print(f"        · {(x.dt.strftime('%Y-%m-%d') if x.dt else 'NO-DATE')} | {x.title[:60]}")
+    job_items = fetch_list_and_details(session, JOB_ZXSS, args.pages, base="http://job.mohrss.gov.cn",
+                                       site="公共招聘网·资讯", discover_fn=discover_links_from_job_list)
+    if DEBUG: print(f"[DEBUG] JOB got {len(job_items)}")
 
-    all_items_raw = mohrss_items + job_items
-    print(f"✅ 原始抓取 {len(all_items_raw)} 条（未去重/未过滤）")
+    all_items = dedup(mohrss_items + job_items)
+    if DEBUG: print(f"[DEBUG] merged {len(all_items)}")
 
-    # 去重 + 命中时间窗口
-    all_items = dedup_by_url(all_items_raw)
-    kept = filter_by_range(all_items, start, end)
-    if DEBUG:
-        print(f"[DEBUG] Time window: {start.strftime('%Y-%m-%d %H:%M:%S')} ~ {end.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"[DEBUG] After time-filter: {len(kept)} items")
-
-    # 排序 + 截断
+    kept = filter_by_time(all_items, start, end, allow_nodate=args.allow_nodate)
     kept.sort(key=lambda x: (x.dt or datetime(1970,1,1, tzinfo=TZ)), reverse=True)
-    show = kept[:args.limit] if args.limit and args.limit > 0 else kept
+    if args.limit > 0:
+        kept = kept[:args.limit]
 
-    md = build_markdown(show, title_prefix)
+    md = build_markdown(kept, title_prefix)
     print("\n--- Markdown Preview ---\n")
     print(md)
 
-    # 落盘
+    # 保存
     try:
         with open("hr_news.md", "w", encoding="utf-8") as f:
             f.write(md)
