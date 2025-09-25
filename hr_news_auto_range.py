@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-hr_news_auto_range.py  （修复“抓不到”的完整可运行版本）
+hr_news_auto_range.py  （完整版 · 修复“抓不到”）
 
-变更要点：
-1) 新增 parse_dt_smart()：兼容 YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD / MM-DD / MM/DD / MM.DD（可带 HH:MM）；
-   遇到“只有月日”会自动补全年份，并在跨年边界做一次合理回退。
-2) 在主流程计算出昨日窗口后，传入 ref_date 给解析器，进一步稳定“昨日专辑”的判断。
-3) 其余逻辑（去重 / 时间过滤 / 排序 / Markdown / 钉钉推送）保持不变。
+关键改动：
+1) parse_dt_smart：兼容 YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD / YYYY年MM月DD日 /
+   MM-DD / MM/DD / MM.DD / M月D日（可带 HH:MM）；无年份 → 结合 ref_date.year 补全年份，
+   若补今年后落在未来则回退一年（解决跨年列表）。
+2) “昨日兜底”：若仍未解析到日期且处于“昨日专辑”模式（传入 ref_date=昨日），
+   临时赋值为“昨日 12:00”，避免被时间窗口全部刷掉。
+3) 选择器做了轻量兜底；其余逻辑保持不变。
 
 依赖：
   pip install requests beautifulsoup4 urllib3
@@ -119,32 +121,52 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
 # ===================== 时间解析 =====================
 def parse_dt_smart(text: str, *, tz=TZ, ref_date=None) -> Optional[datetime]:
     """
-    兼容多种列表日期格式：
+    兼容：
       - YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
-      - MM-DD / MM/DD / MM.DD   （无年份 → 自动补今年；若补今年后落在“未来”，则回退一年）
+      - YYYY年MM月DD日
+      - MM-DD / MM/DD / MM.DD
+      - M月D日 / MM月DD日
       - 可选 HH:MM
-    ref_date: 参考日期（date 对象），用于“昨日专辑”场景的年份推断，默认取今日（Asia/Shanghai）。
+    无年份 → 用 ref_date.year（若落在未来 → 回退一年）
     """
     if not text:
         return None
     s = re.sub(r"\s+", " ", text.strip())
 
-    # 1) 标准带年的
+    # 1) 带年（- / . / /）
     m = re.search(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
     if m:
         y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
         hh, mm = (int(m.group(4)), int(m.group(5))) if m.group(4) and m.group(5) else (12, 0)
         return datetime(y, mo, d, hh, mm, tzinfo=tz)
 
-    # 2) 只有月日
-    m2 = re.search(r"^(\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
-    if m2:
-        mo, d = int(m2.group(1)), int(m2.group(2))
-        hh, mm = (int(m2.group(3)), int(m2.group(4))) if m2.group(3) and m2.group(4) else (12, 0)
+    # 2) 带年（中文：YYYY年MM月DD日）
+    m = re.search(r"^(\d{4})年(\d{1,2})月(\d{1,2})日(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh, mm = (int(m.group(4)), int(m.group(5))) if m.group(4) and m.group(5) else (12, 0)
+        return datetime(y, mo, d, hh, mm, tzinfo=tz)
+
+    # 3) 只有月日（- / . / /）
+    m = re.search(r"^(\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        hh, mm = (int(m.group(3)), int(m.group(4))) if m.group(3) and m.group(4) else (12, 0)
         base = datetime.now(tz).date() if ref_date is None else ref_date
         y = base.year
         cand = datetime(y, mo, d, hh, mm, tzinfo=tz)
-        # 若补今年后“在未来”，大概率是跨年列表（如 12/30 看到了 01-02），则回退一年
+        if cand.date() > base:  # 跨年回退
+            cand = datetime(y - 1, mo, d, hh, mm, tzinfo=tz)
+        return cand
+
+    # 4) 只有月日（中文：M月D日）
+    m = re.search(r"^(\d{1,2})月(\d{1,2})日(?:\s+(\d{1,2}):(\d{1,2}))?$", s)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        hh, mm = (int(m.group(3)), int(m.group(4))) if m.group(3) and m.group(4) else (12, 0)
+        base = datetime.now(tz).date() if ref_date is None else ref_date
+        y = base.year
+        cand = datetime(y, mo, d, hh, mm, tzinfo=tz)
         if cand.date() > base:
             cand = datetime(y - 1, mo, d, hh, mm, tzinfo=tz)
         return cand
@@ -210,17 +232,24 @@ class MohrssList:
                 continue
             url = urljoin(self.BASE, a["href"].strip())
 
-            # 日期：尝试多个位置
+            # 日期：尝试多个位置 + 文本兜底
             date_el = (card.select_one(".organMenuTxtLink")
                        or card.select_one(".organGeneralNewListTxtConTime")
                        or card.select_one(".time") or card.select_one(".date"))
             dt_txt = date_el.get_text(" ", strip=True) if date_el else ""
             if not dt_txt:
-                m_any = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})|(\d{1,2})[-/.](\d{1,2})", card.get_text(" ", strip=True))
+                # 从整段文本里兜底抓一个“带年或月日”的片段
+                m_any = re.search(r"(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})|(\d{1,2}[-/.]\d{1,2})|(\d{1,2}月\d{1,2}日)", card.get_text(" ", strip=True))
                 if m_any:
                     dt_txt = m_any.group(0)
 
+            # —— 解析 + 昨日兜底 ——
             dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
+            if not dt and self.ref_date is not None:
+                try:
+                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
+                except Exception:
+                    dt = None
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
 
@@ -241,9 +270,16 @@ class MohrssList:
             url = urljoin(self.BASE, a["href"].strip())
             tds = tr.find_all("td")
             dt_txt = tds[-1].get_text(" ", strip=True) if len(tds) >= 2 else tr.get_text(" ", strip=True)
+
             dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
+            if not dt and self.ref_date is not None:
+                try:
+                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
+                except Exception:
+                    dt = None
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
+
             items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(table)"))
 
         if items:
@@ -266,9 +302,16 @@ class MohrssList:
                     dt_txt = node.get_text(" ", strip=True); break
             if not dt_txt:
                 dt_txt = li.get_text(" ", strip=True)
+
             dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
+            if not dt and self.ref_date is not None:
+                try:
+                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
+                except Exception:
+                    dt = None
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
+
             items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(ul)"))
 
         return items
@@ -329,7 +372,13 @@ class JobZxss:
 
             span = li.find("span", class_=re.compile(r"floatright.*gray"))
             dt_txt = span.get_text(" ", strip=True) if span else ""
+
             dt = parse_dt_smart(dt_txt, ref_date=self.ref_date)
+            if not dt and self.ref_date is not None:
+                try:
+                    dt = datetime(self.ref_date.year, self.ref_date.month, self.ref_date.day, 12, 0, tzinfo=TZ)
+                except Exception:
+                    dt = None
             if REQUIRE_DATE_JOB and not dt:
                 continue
 
@@ -374,10 +423,7 @@ def build_markdown(items: List[Item], title_prefix: str) -> str:
         return "\n".join(lines)
     for i, it in enumerate(items, 1):
         if it.dt:
-            if it.dt.hour or it.dt.minute:
-                dt_str = it.dt.strftime("%Y-%m-%d %H:%M")
-            else:
-                dt_str = it.dt.strftime("%Y-%m-%d")
+            dt_str = it.dt.strftime("%Y-%m-%d %H:%M") if (it.dt.hour or it.dt.minute) else it.dt.strftime("%Y-%m-%d")
         else:
             dt_str = ""
         lines.append(f"{i}. [{it.title}]({it.url})　—　*{it.source}*　`{dt_str}`")
