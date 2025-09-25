@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 hr_news_auto_range.py
-抓取两个固定来源（无需关键词）：
-  1) 人社部新闻/动态栏目：部内要闻、人才新闻（人社新闻）与地方动态（可扩展）
-  2) 中国公共招聘网：资讯列表首页（主列表，右侧有日期）
 
-时间策略（已按需固定）：
-  - 恒定抓“昨天” 00:00~23:59（Asia/Shanghai）
+◆ 抓取来源（固定栏目、无关键词）：
+  1) 人社部新闻/动态：
+     - 部内要闻（buneiyaowen）
+     - 人社新闻（rsxw）
+     - 地方动态（dfdt）
+     ☆ 只接受列表页能直接取到的日期（YYYY-MM-DD），无日期丢弃
+  2) 中国公共招聘网（zxss）：仅主列表 li，右侧日期（YYYY-MM-DD），无日期丢弃
 
-规则（更严格）：
-  - 仅接收“列表页能直接取到的日期”项；无日期一律丢弃
-  - 公共招聘网只解析主列表 li（右侧 YYYY-MM-DD）
-  - 人社部支持 table / ul.li / 新闻频道常见的 div 行块结构
+◆ 时间策略：
+  - 恒定“抓昨天（Asia/Shanghai）” 00:00~23:59:59
+  - 也支持 --date 指定日期（yesterday / YYYY-MM-DD）
+  - 若关闭 --auto-range，则使用 --window-hours 滚动窗口（默认 48h）
+
+◆ 输出：
+  - Markdown（标题、来源、日期、URL）
+  - 可选钉钉 Markdown 推送（使用带 A 的环境变量名）
 
 依赖：
   pip install requests beautifulsoup4 urllib3
@@ -39,18 +45,21 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/123.0.0.0 Safari/537.36")
 
-# —— 人社部栏目（可按需增删）——
-MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"          # 地方动态
-MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/rsxw/"          # 人社新闻（人才新闻/人社新闻）
-MOHRSS_BNYW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/"   # 部内要闻（你截图的这类）
+# —— 人社部栏目（按需增删）——
+MOHRSS_BNYW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/"  # 部内要闻
+MOHRSS_RSXW = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/rsxw/"        # 人社新闻
+MOHRSS_DFDT = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"        # 地方动态
 MOHRSS_SECTIONS = [MOHRSS_BNYW, MOHRSS_RSXW, MOHRSS_DFDT]
 
 # —— 公共招聘网 ——（主列表）
 JOB_ZXSS = "http://job.mohrss.gov.cn/zxss/index.jhtml"
 
-# —— 强制“必须有日期” —— 
+# —— 强制“必须有日期”（列表页即可取得）——
 REQUIRE_DATE_MOHRSS = True
 REQUIRE_DATE_JOB = True
+
+# —— Debug 开关（打印解析统计）——
+DEBUG = os.getenv("DEBUG", "").lower() in ("1","true","yes","on")
 
 # —— 钉钉（A 变量名；可用 Secrets 覆盖）——
 DEFAULT_WEBHOOK = (
@@ -115,32 +124,19 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
         return False
 
 # ===================== 时间解析 =====================
-DATE_PATS = [
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})\s+(\d{1,2}):(\d{1,2})",  # 2025-09-16 08:30
-    r"(20\d{2})[^\d](\d{1,2})[^\d](\d{1,2})",                        # 2025-09-16
-    r"^(\d{4})-(\d{1,2})-(\d{1,2})$",                                # 严格 YYYY-MM-DD
-]
-
 def parse_dt(text: str) -> Optional[datetime]:
+    """仅解析 YYYY-MM-DD 或 YYYY-MM-DD HH:MM；否则返回 None。"""
     if not text:
         return None
     t = re.sub(r"\s+", " ", text.strip())
-    # 严格 YYYY-MM-DD 优先
-    m0 = re.search(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
-    if m0:
-        y, mo, d = map(int, m0.groups())
-        return datetime(y, mo, d, 12, 0, tzinfo=TZ)
-    for pat in DATE_PATS:
-        m = re.search(pat, t)
-        if not m:
-            continue
-        if len(m.groups()) == 5:
-            y, mo, d, hh, mm = map(int, m.groups())
-            return datetime(y, mo, d, hh, mm, tzinfo=TZ)
-        if len(m.groups()) == 3:
-            y, mo, d = map(int, m.groups())
-            return datetime(y, mo, d, 12, 0, tzinfo=TZ)
-    return None
+    m = re.search(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?$", t)
+    if not m:
+        return None
+    y, mo, d, hh, mm = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+    y, mo, d = int(y), int(mo), int(d)
+    if hh and mm:
+        return datetime(y, mo, d, int(hh), int(mm), tzinfo=TZ)
+    return datetime(y, mo, d, 12, 0, tzinfo=TZ)
 
 def day_range(date_str: str) -> Tuple[datetime, datetime]:
     if date_str.lower() == "yesterday":
@@ -189,13 +185,21 @@ class MohrssList:
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
-        # (A) 新闻频道常见的 div 行块结构：标题 a，同行/右侧 span 含 YYYY-MM-DD
-        blocks = soup.select(
-            "div.serviceMainList, div.serviceMainListTxt, "
-            "div.organGeneralNewListTxtConTime, div.serviceMainListCon, "
-            "div.list, div.listCon"
-        )
-        for blk in blocks:
+        # === 方案一：通用“行块”解析（标题 <a> + 同块或近邻中的 YYYY-MM-DD）===
+        # 适配你截图中的：serviceMainListTxt / serviceMainListCon 等结构
+        line_blocks = []
+        selectors = [
+            "div.serviceMainListTxt", "div.serviceMainListCon",
+            "div.serviceMainList", "div.organGeneralNewListTxtConTime",
+            "div.list", "div.listCon",
+            "div[class*='list']", "div[class*='List']",
+            "li", "tr"
+        ]
+        for sel in selectors:
+            line_blocks.extend(soup.select(sel))
+
+        seen = set()
+        for blk in line_blocks:
             a = blk.find("a", href=True)
             if not a:
                 continue
@@ -203,22 +207,28 @@ class MohrssList:
             if not title:
                 continue
             url = urljoin(self.BASE, a["href"].strip())
+            if url in seen:
+                continue
 
-            neighbor_txt = " ".join(el.get_text(" ", strip=True) for el in [blk, blk.parent] if el)
-            m = re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})", neighbor_txt)
+            neighbor_texts = [blk.get_text(" ", strip=True)]
+            if blk.parent:
+                neighbor_texts.append(blk.parent.get_text(" ", strip=True))
+            big_text = "  ".join(neighbor_texts)
+            m = re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})(?:\s+\d{1,2}:\d{1,2})?", big_text)
             dt = None
             if m:
-                y, mo, d = map(int, m.groups())
+                y, mo, d = map(int, m.groups()[:3])
                 dt = datetime(y, mo, d, 12, 0, tzinfo=TZ)
 
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·新闻/动态"))
+            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部"))
+            seen.add(url)
 
         if items:
             return items
 
-        # (B) table 行结构
+        # === 方案二：table 结构兜底 ===
         rows = soup.select("table tr")
         for tr in rows:
             a = tr.find("a", href=True)
@@ -233,12 +243,12 @@ class MohrssList:
             dt = parse_dt(dt_txt)
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·列表(table)"))
+            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(table)"))
 
         if items:
             return items
 
-        # (C) ul/li 结构
+        # === 方案三：ul/li 结构兜底 ===
         lis = soup.select("ul li")
         for li in lis:
             a = li.find("a", href=True)
@@ -258,7 +268,7 @@ class MohrssList:
             dt = parse_dt(dt_txt)
             if REQUIRE_DATE_MOHRSS and not dt:
                 continue
-            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部·列表(ul)"))
+            items.append(Item(title=title, url=url, dt=dt, content="", source="人社部(ul)"))
 
         return items
 
@@ -295,17 +305,13 @@ class JobZxss:
         return self.LIST + f"{sep}pageNo={page}"
 
     def parse_list(self, html: str) -> List[Item]:
-        """
-        只解析主列表：div.zp-listnavbox ul li
-        结构：<a href>标题</a><span class="floatright font12 gray">YYYY-MM-DD</span>
-        必须命中日期；不再去详情页补时间；过滤非 mohrss 域名。
-        """
         soup = BeautifulSoup(html, "html.parser")
         items: List[Item] = []
 
+        # 仅主列表（避免“热门/最新文章”混入）
         lis = soup.select("div.zp-listnavbox ul li")
         if not lis:
-            # 宽松兜底：任何 li 里含右侧日期 span 的
+            # 宽松兜底：任何 li 中出现右侧日期 span 的
             lis = [li for li in soup.select("ul li")
                    if li.find("span", class_=re.compile(r"floatright.*gray"))]
 
@@ -321,6 +327,7 @@ class JobZxss:
             if not host.endswith("mohrss.gov.cn"):
                 continue
 
+            # 右侧日期
             span = li.find("span", class_=re.compile(r"floatright.*gray"))
             dt_txt = span.get_text(" ", strip=True) if span else ""
             dt = parse_dt(dt_txt)
@@ -328,7 +335,6 @@ class JobZxss:
                 continue
 
             items.append(Item(title=title, url=url, dt=dt, content="", source="公共招聘网·资讯"))
-
         return items
 
     def run(self, pages: int) -> List[Item]:
@@ -368,24 +374,22 @@ def build_markdown(items: List[Item], title_prefix: str) -> str:
         lines.append("> 暂无更新。")
         return "\n".join(lines)
     for i, it in enumerate(items, 1):
-        # 列表页多为 YYYY-MM-DD；若没有时分，显示日期即可
         dt_str = it.dt.strftime("%Y-%m-%d %H:%M") if (it.dt and (it.dt.hour or it.dt.minute)) else it.dt.strftime("%Y-%m-%d")
-        line = f"{i}. [{it.title}]({it.url})　—　*{it.source}*　`{dt_str}`"
-        lines.append(line)
+        lines.append(f"{i}. [{it.title}]({it.url})　—　*{it.source}*　`{dt_str}`")
         lines.append("")
     return "\n".join(lines)
 
 # ===================== 主流程 =====================
 def main():
-    ap = argparse.ArgumentParser(description="人社部新闻/动态 + 公共招聘网资讯（固定栏目，昨日 & 必须有日期）→ 钉钉推送")
+    ap = argparse.ArgumentParser(description="人社部新闻/动态 + 公共招聘网（昨日 & 列表页有日期）→ 钉钉推送")
     ap.add_argument("--pages", type=int, default=int(os.getenv("PAGES", "2")), help="每站翻页数（默认2）")
     ap.add_argument("--delay", type=float, default=float(os.getenv("DELAY", "0.8")), help="请求间隔秒（默认0.8）")
     ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT", "50")), help="展示上限（默认50）")
-    ap.add_argument("--date", default=os.getenv("DATE", ""), help="指定日期（yesterday/2025-09-17）；为空启用 --auto-range")
+    ap.add_argument("--date", default=os.getenv("DATE", ""), help="指定日期（yesterday/2025-09-24）；为空启用 --auto-range")
     ap.add_argument("--auto-range", default=os.getenv("AUTO_RANGE", "true").lower()=="true",
                     action="store_true", help="启用自动范围（默认开，恒定昨天）")
     ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS", "48")),
-                    help="当不启用自动范围时使用的滚动窗口小时数（默认48）")
+                    help="当不启用自动范围时使用滚动窗口小时数（默认48）")
     ap.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
     args = ap.parse_args()
 
@@ -395,13 +399,23 @@ def main():
     mohrss_items: List[Item] = []
     for url in MOHRSS_SECTIONS:
         mohr = MohrssList(session, url, delay=args.delay)
-        mohrss_items.extend(mohr.run(args.pages))
+        got = mohr.run(args.pages)
+        if DEBUG:
+            print(f"[DEBUG] MOHRSS: {url} → parsed {len(got)} items (before filter)")
+            for x in got[:5]:
+                print(f"        · {(x.dt.strftime('%Y-%m-%d') if x.dt else 'NO-DATE')} | {x.title[:50]}")
+        mohrss_items.extend(got)
 
     # 公共招聘网
     job = JobZxss(session, delay=args.delay)
     job_items = job.run(args.pages)
+    if DEBUG:
+        print(f"[DEBUG] JOB.ZXSS → parsed {len(job_items)} items (before filter)")
+        for x in job_items[:5]:
+            print(f"        · {(x.dt.strftime('%Y-%m-%d') if x.dt else 'NO-DATE')} | {x.title[:50]}")
 
-    all_items = dedup_by_url(mohrss_items + job_items)
+    all_items_raw = mohrss_items + job_items
+    print(f"✅ 原始抓取 {len(all_items_raw)} 条（未去重/未过滤）")
 
     # 时间范围
     if args.date:
@@ -415,19 +429,22 @@ def main():
         end = now
         title_prefix = f"近{args.window_hours}小时"
 
-    # 只保留命中时间窗口的项
-    all_items = filter_by_range(all_items, start, end)
+    # 去重 + 只保留命中时间窗口
+    all_items = dedup_by_url(all_items_raw)
+    kept = filter_by_range(all_items, start, end)
+    if DEBUG:
+        print(f"[DEBUG] Time window: {start.strftime('%Y-%m-%d %H:%M:%S')} ~ {end.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[DEBUG] After time-filter: {len(kept)} items")
 
     # 排序 + 截断
-    all_items.sort(key=lambda x: x.dt, reverse=True)
-    show = all_items[:args.limit] if args.limit and args.limit > 0 else all_items
+    kept.sort(key=lambda x: x.dt, reverse=True)
+    show = kept[:args.limit] if args.limit and args.limit > 0 else kept
 
-    print(f"✅ 原始抓取 {len(mohrss_items)+len(job_items)} 条；去重后 {len(all_items)} 条；展示 {len(show)} 条。")
     md = build_markdown(show, title_prefix)
     print("\n--- Markdown Preview ---\n")
     print(md)
 
-    # 落盘（便于 artifacts 下载）
+    # 落盘
     try:
         with open("hr_news.md", "w", encoding="utf-8") as f:
             f.write(md)
