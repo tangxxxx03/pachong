@@ -7,18 +7,6 @@ hr_news_detail_first.py  —— 深入爬取 · 详情页优先（稳定避开�
 - 列表页只取链接；真实发布时间从详情页解析（正文/时间节点/meta/URL/Last-Modified 多重兜底）
 - 时间过滤：支持 --date=yesterday 或指定 YYYY-MM-DD；默认滚动窗口 --window-hours（48）
 - 钉钉 Markdown 推送（A版 env：DINGTALK_WEBHOOKA / DINGTALK_SECRETA）
-
-依赖：
-  pip install requests beautifulsoup4 urllib3
-用法：
-  # 近48小时滚动窗口（默认）
-  python hr_news_detail_first.py
-  # 昨日专辑（上海时区昨日0-24点）
-  python hr_news_detail_first.py --date yesterday
-  # 指定日期
-  python hr_news_detail_first.py --date 2025-09-24
-  # 调试仅打印不推送
-  DEBUG=1 python hr_news_detail_first.py --no-push
 """
 
 import os, re, time, hmac, base64, hashlib, argparse, email.utils
@@ -47,10 +35,9 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     "Connection": "close",
 }
-
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes", "on")
 
-# —— 人社部栏目（可增删） ——
+# —— 人社部栏目 —— 
 MOHRSS_BASE = "https://www.mohrss.gov.cn"
 MOHRSS_SECTIONS = {
     "部内要闻": f"{MOHRSS_BASE}/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/",
@@ -59,11 +46,9 @@ MOHRSS_SECTIONS = {
     "会议活动": f"{MOHRSS_BASE}/SYrlzyhshbzb/dongtaixinwen/hyhd/",
 }
 
-# —— 钉钉（A 版变量名；可被环境覆盖） ——
-DEFAULT_WEBHOOK = (
-    "https://oapi.dingtalk.com/robot/send?"
-    "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
-)
+# —— 钉钉（A 版变量名） —— 
+DEFAULT_WEBHOOK = ("https://oapi.dingtalk.com/robot/send?"
+                   "access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49")
 DEFAULT_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
 def _first_env(*keys: str, default: str = "") -> str:
@@ -90,7 +75,7 @@ def make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.trust_env = False  # 忽略代理环境变量
+    s.trust_env = False
     return s
 
 # ===================== 钉钉推送 =====================
@@ -140,7 +125,6 @@ def parse_any_datetime(text: str, *, ref: Optional[datetime]=None) -> Optional[d
     if not text:
         return None
     s = re.sub(r"\s+", " ", text.strip())
-    # 带年
     for p in DATE_PATTS:
         m = re.search(p, s)
         if m:
@@ -151,14 +135,13 @@ def parse_any_datetime(text: str, *, ref: Optional[datetime]=None) -> Optional[d
             elif len(g) == 3:
                 y, mo, d = g
                 return build_dt(y, mo, d)
-    # 月日
     base = (ref or datetime.now(TZ))
     for p in MONTHDAY_PATTS:
         m = re.search(p, s)
         if m:
             mo, d = int(m.group(1)), int(m.group(2))
             cand = build_dt(base.year, mo, d)
-            if cand > base:  # 跨年
+            if cand > base:
                 cand = build_dt(base.year - 1, mo, d)
             return cand
     return None
@@ -180,24 +163,22 @@ class Item:
     source: str
 
 # ===================== 解析器（详情优先） =====================
-def discover_links_from_mohrss_list(html: str, base: str) -> Iterable[Tuple[str,str]]:
+def discover_links_from_mohrss_list(html: str, base_page_url: str) -> Iterable[Tuple[str,str]]:
+    """从列表页抽取文章链接；注意用【当前列表页URL】做 urljoin 的基准"""
     soup = BeautifulSoup(html, "html.parser")
-
-    # 兼容两种常见卡片容器
     blocks = soup.select("div.serviceMainListTabCon, div.serviceMainListTxtCon")
     if not blocks:
-        # 兜底：列表/表格
         blocks = soup.select("ul li, table tr")
-
     seen = set()
     for b in blocks:
         a = b.find("a", href=True)
-        if not a: 
+        if not a:
             continue
         href = a["href"].strip()
         if href.startswith("javascript:") or href.startswith("#"):
             continue
-        url = urljoin(base, href)
+        # —— 修正点：以“当前页 URL”为基准拼接相对路径 —— #
+        url = urljoin(base_page_url, href)
         if url in seen:
             continue
         seen.add(url)
@@ -208,13 +189,9 @@ def discover_links_from_mohrss_list(html: str, base: str) -> Iterable[Tuple[str,
 def extract_publish_dt_from_detail(html: str, url: str, last_modified_header: str = "") -> Optional[datetime]:
     soup = BeautifulSoup(html, "html.parser")
     text_blocks = []
-
-    # 1) 常见时间节点
     cand_nodes = soup.select("time, .time, .date, .pubtime, .publish-time, .source, .info, .article-info, .xxgk-info")
     for n in cand_nodes:
         text_blocks.append(n.get_text(" ", strip=True))
-
-    # 2) meta
     for sel in [
         "meta[name='PubDate']", "meta[name='publishdate']",
         "meta[property='article:published_time']", "meta[name='releaseDate']",
@@ -223,44 +200,34 @@ def extract_publish_dt_from_detail(html: str, url: str, last_modified_header: st
         m = soup.select_one(sel)
         if m and m.get("content"):
             text_blocks.append(m["content"])
-
-    # 3) 标题/正文首段
     header = soup.select_one("h1, .title, .articleTitle")
     if header:
         text_blocks.append(header.get_text(" ", strip=True))
     body = soup.select_one("article, .article, .TRS_Editor, .content, #content")
     if body:
         text_blocks.append(body.get_text(" ", strip=True)[:500])
-
-    # 4) URL 中的日期
     text_blocks.append(url.replace("/", " ").replace("_", " "))
-
-    # 5) Last-Modified
     if last_modified_header:
         text_blocks.append(last_modified_header)
-
     big = " | ".join([t for t in text_blocks if t])
-    dt = parse_any_datetime(big, ref=datetime.now(TZ))
-    return dt
+    return parse_any_datetime(big, ref=datetime.now(TZ))
 
 def fetch_list_and_details(session: requests.Session, list_url: str, pages: int, site: str) -> List[Item]:
     items: List[Item] = []
     for p in range(1, pages + 1):
-        # 翻页：人社部 index_{p}.html
         url = list_url if p == 1 else urljoin(list_url, f"index_{p}.html")
         r = session.get(url, timeout=20)
         r.encoding = r.apparent_encoding or "utf-8"
         html = r.text
         if DEBUG: print(f"[DEBUG] list {site} p{p} len={len(html)}")
 
-        for title, link in discover_links_from_mohrss_list(html, MOHRSS_BASE):
+        # —— 修正点：把“当前列表页 URL (url)”传进去当基准 —— #
+        for title, link in discover_links_from_mohrss_list(html, url):
             try:
                 rr = session.get(link, timeout=20, headers={"Referer": url})
                 rr.encoding = rr.apparent_encoding or "utf-8"
                 lm = rr.headers.get("Last-Modified") or rr.headers.get("last-modified") or ""
                 dt = extract_publish_dt_from_detail(rr.text, link, lm)
-
-                # 兜底：Last-Modified 转换
                 if not dt and lm:
                     try:
                         dt_parsed = email.utils.parsedate_to_datetime(lm)
@@ -270,7 +237,6 @@ def fetch_list_and_details(session: requests.Session, list_url: str, pages: int,
                             dt = dt_parsed.replace(tzinfo=TZ)
                     except Exception:
                         dt = None
-
                 items.append(Item(title=title, url=link, dt=dt, source=site))
                 time.sleep(0.4)
             except Exception as e:
@@ -312,7 +278,6 @@ def build_markdown(items: List[Item], title_prefix: str) -> str:
     if not items:
         lines.append("> 暂无更新。")
         return "\n".join(lines)
-
     for i, it in enumerate(items, 1):
         ds = it.dt.strftime("%Y-%m-%d %H:%M") if it.dt else "（时间未知）"
         lines.append(f"{i}. [{it.title}]({it.url})  —  *{it.source}*  `{ds}`")
@@ -327,27 +292,21 @@ def main():
     ap.add_argument("--limit", type=int, default=int(os.getenv("LIMIT","50")))
     ap.add_argument("--date", default=os.getenv("DATE",""), help="yesterday / YYYY-MM-DD")
     ap.add_argument("--auto-range", default=os.getenv("AUTO_RANGE","").lower()=="true", action="store_true")
-    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS","48")),
-                    help="滚动窗口小时数（当未指定 --date 且未启用 --auto-range 时生效）")
-    ap.add_argument("--allow-nodate", action="store_true", help="允许无日期条目进入（极端兜底）")
+    ap.add_argument("--window-hours", type=int, default=int(os.getenv("WINDOW_HOURS","48")))
+    ap.add_argument("--allow-nodate", action="store_true")
     ap.add_argument("--no-push", action="store_true")
     args = ap.parse_args()
 
     session = make_session()
 
-    # 时间窗口
     if args.date:
-        start, end = day_range(args.date)
-        title_prefix = f"{args.date} 专题"
+        start, end = day_range(args.date); title_prefix = f"{args.date} 专题"
     elif args.auto_range:
-        start, end = day_range("yesterday")
-        title_prefix = "昨日专辑"
+        start, end = day_range("yesterday"); title_prefix = "昨日专辑"
     else:
-        now = datetime.now(TZ)
-        start, end = (now - timedelta(hours=args.window_hours)), now
+        now = datetime.now(TZ); start, end = (now - timedelta(hours=args.window_hours)), now
         title_prefix = f"近{args.window_hours}小时"
 
-    # 抓取全部栏目（详情优先）
     all_items: List[Item] = []
     for name, url in MOHRSS_SECTIONS.items():
         try:
@@ -358,7 +317,6 @@ def main():
         except Exception as e:
             print(f"[WARN] 抓取 {name} 出错：{e}")
 
-    # 去重 + 过滤 + 排序 + 截断
     all_items = dedup(all_items)
     kept = filter_by_time(all_items, start, end, allow_nodate=args.allow_nodate)
     kept.sort(key=lambda x: (x.dt or datetime(1970,1,1, tzinfo=TZ)), reverse=True)
@@ -366,10 +324,8 @@ def main():
         kept = kept[:args.limit]
 
     md = build_markdown(kept, title_prefix)
-    print("\n--- Markdown Preview ---\n")
-    print(md)
+    print("\n--- Markdown Preview ---\n"); print(md)
 
-    # 落盘
     try:
         with open("hr_news.md", "w", encoding="utf-8") as f:
             f.write(md)
