@@ -370,7 +370,7 @@ def run_hr(args):
     crawler = HRNewsCrawler()
     items = crawler.get_today_news() or []
     md = build_markdown_hr(args.tz, items, args.limit)
-    send_dingtalk_markdown("早安资讯｜HR综合（不含人民网）", md)
+    send_dingtalk_markdown("早安资讯｜HR综合", md)
     return items
 
 def run_both(args):
@@ -378,7 +378,7 @@ def run_both(args):
     return run_hr(args)
 
 def main():
-    parser = argparse.ArgumentParser(description="HR 多站合并推送（不爬人民网）")
+    parser = argparse.ArgumentParser(description="HR 多站合并推送")
     sub = parser.add_subparsers(dest="mode")
 
     # hr 子命令
