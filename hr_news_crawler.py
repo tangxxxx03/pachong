@@ -34,8 +34,8 @@ def _sign_webhook(base, secret):
     return f"{base}{sep}timestamp={ts}&sign={sign}"
 
 def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASEA") or os.getenv("DINGTALK_BASE")
-    secret = os.getenv("DINGTALK_SECRETA") or os.getenv("DINGTALK_SECRET")
+    base = os.getenv("DINGTALK_BASEA")
+    secret = os.getenv("DINGTALK_SECRETA")
     if not base or "REPLACE_ME" in base:
         print("🔕 未配置钉钉 Webhook，跳过推送。")
         return False
@@ -160,7 +160,7 @@ class HRLooCrawler:
 def build_md(items):
     now = now_tz()
     out = [f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**", "",
-           "**标题：早安资讯｜人力资源关键词资讯（24小时内）**", "", "**主要内容**"]
+           "**标题：早安资讯｜人力资源每日资讯推送**", "", "**主要内容**"]
     if not items:
         out.append("> 24小时内无符合关键词的内容。")
         return "\n".join(out)
@@ -180,4 +180,4 @@ if __name__ == "__main__":
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("早安资讯｜三茅人力资源超干净版", md)
+    send_dingtalk_markdown("早安资讯｜人力资源每日资讯推送", md)
