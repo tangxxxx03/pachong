@@ -1,16 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）专抓版
+HRLoo（三茅人力资源网）专抓版 · 强化环境变量兼容 & 可配置 CLI
 - 仅抓取 HRLoo，当天信息；统一 Markdown 推送钉钉；支持总条数上限、关键词过滤
-- 继承原逻辑：只抓当天（可用 HR_ONLY_TODAY 关闭）、关键词命中、旧 TLS 兼容、重试等
-- 环境变量兼容：
-    DINGTALK_BASE / DINGTALK_SECRET / DINGTALK_KEYWORD
-    HR_FILTER_KEYWORDS（默认：人力资源，逗号/空格分隔）
-    HR_REQUIRE_ALL（默认0，设为1表示需要命中全部关键词）
-    HR_ONLY_TODAY（默认1，当天）
-    HR_TZ（默认 Asia/Shanghai）
-    HR_MAX_ITEMS（默认10，单站最大抓取条数）
-    SRC_HRLOO_URLS（默认：https://www.hrloo.com/）
+- 兼容多套钉钉变量名：DINGTALK_BASEA / DINGTALK_WEBHOOKA / DINGTALK_BASE / DINGTALK_WEBHOOK
+                       DINGTALK_SECRETA / DINGTALK_SECRET
+- 可通过 CLI 覆盖：关键词/是否必须全部命中/是否仅当天/单站最大条数/展示上限/时区/不推送
 """
 
 import os
@@ -36,14 +30,34 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ====================== DingTalk 统一配置 ======================
+# ====================== 通用工具 ======================
+def norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").replace("\u3000", " ").strip())
+
+def zh_weekday(dt):
+    return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
+
+def get_env_any(names: list[str], default: str = "") -> str:
+    """按顺序返回第一个非空环境变量值，并去掉首尾空白。"""
+    for n in names:
+        v = os.getenv(n, "").strip()
+        if v:
+            return v
+    return default.strip()
+
+# ====================== DingTalk 统一配置（多名兼容） ======================
+# 允许使用以下任意一个设置 Webhook：
+#   DINGTALK_BASEA / DINGTALK_WEBHOOKA / DINGTALK_BASE / DINGTALK_WEBHOOK
 DEFAULT_DINGTALK_WEBHOOK = (
     "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
 )
-DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
+DEFAULT_DINGTALK_SECRET  = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
-DINGTALK_BASE   = os.getenv("DINGTALK_BASEA", DEFAULT_DINGTALK_WEBHOOK).strip()
-DINGTALK_SECRET = os.getenv("DINGTALK_SECRETA", DEFAULT_DINGTALK_SECRET).strip()
+DINGTALK_BASE = get_env_any(
+    ["DINGTALK_BASEA", "DINGTALK_WEBHOOKA", "DINGTALK_BASE", "DINGTALK_WEBHOOK"],
+    DEFAULT_DINGTALK_WEBHOOK
+)
+DINGTALK_SECRET = get_env_any(["DINGTALK_SECRETA", "DINGTALK_SECRET"], DEFAULT_DINGTALK_SECRET)
 DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD", "").strip()
 
 def _sign_webhook(base_webhook: str, secret: str) -> str:
@@ -59,9 +73,24 @@ def _sign_webhook(base_webhook: str, secret: str) -> str:
     return f"{base_webhook}{sep}timestamp={ts}&sign={sign}"
 
 def send_dingtalk_markdown(title: str, md_text: str) -> bool:
+    # 诊断输出：告诉用户我们命中了哪一套环境变量（只打印一次）
+    used_keys = {
+        "webhook_hit": "BASEA" if os.getenv("DINGTALK_BASEA") else (
+            "WEBHOOKA" if os.getenv("DINGTALK_WEBHOOKA") else (
+                "BASE" if os.getenv("DINGTALK_BASE") else (
+                    "WEBHOOK" if os.getenv("DINGTALK_WEBHOOK") else "DEFAULT"
+                )
+            )
+        ),
+        "secret_hit": "SECRETA" if os.getenv("DINGTALK_SECRETA") else (
+            "SECRET" if os.getenv("DINGTALK_SECRET") else "DEFAULT"
+        ),
+    }
+    print(f"[DingTalk] using webhook:{used_keys['webhook_hit']} secret:{used_keys['secret_hit']}")
+
     webhook = _sign_webhook(DINGTALK_BASE, DINGTALK_SECRET)
     if not webhook:
-        print("🔕 未配置钉钉 Webhook，跳过推送。")
+        print("🔕 未配置钉钉 Webhook（DINGTALK_BASE[A]/DINGTALK_WEBHOOK[A] 均为空），跳过推送。")
         return False
     if DINGTALK_KEYWORD and (DINGTALK_KEYWORD not in title and DINGTALK_KEYWORD not in md_text):
         title = f"{DINGTALK_KEYWORD} | {title}"
@@ -69,7 +98,9 @@ def send_dingtalk_markdown(title: str, md_text: str) -> bool:
     try:
         r = requests.post(webhook, json=payload, timeout=20)
         ok = (r.status_code == 200 and r.json().get("errcode") == 0)
-        print("DingTalk resp:", r.status_code, r.text[:200])
+        print("DingTalk resp:", r.status_code, r.text[:300])
+        if not ok:
+            print("⚠️ 钉钉返回非 0 errcode，请检查加签/机器人权限/关键字等。")
         return ok
     except Exception as e:
         print("DingTalk error:", e)
@@ -109,24 +140,34 @@ def make_session():
     s.mount("https://", legacy)
     return s
 
-# ====================== 通用工具 ======================
-def norm(s: str) -> str:
-    import re as _re
-    return _re.sub(r"\s+", " ", (s or "").replace("\u3000", " ").strip())
-
-def zh_weekday(dt):
-    return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
-
 def now_tz():
     tz = ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai").strip())
     return datetime.now(tz)
 
-# ====================== 运行参数 & 过滤配置 ======================
-HR_MAX_PER_SOURCE = int(os.getenv("HR_MAX_ITEMS", "10"))
-HR_ONLY_TODAY = os.getenv("HR_ONLY_TODAY", "1").strip().lower() in ("1", "true", "yes", "y")
-HR_TZ_STR = os.getenv("HR_TZ", "Asia/Shanghai").strip()
-HR_REQUIRE_ALL = os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y")
-HR_KEYWORDS = [k.strip() for k in re.split(r"[,\s，；;|]+", os.getenv("HR_FILTER_KEYWORDS", "人力资源")) if k.strip()]
+# ====================== 运行参数 & 过滤配置（支持 env + CLI） ======================
+def parse_args():
+    parser = argparse.ArgumentParser(description="人力资源每日资讯推送（HRLoo 专抓版）")
+    parser.add_argument("--tz", default=os.getenv("HR_TZ", "Asia/Shanghai"),
+                        help="时区（默认 Asia/Shanghai）")
+    parser.add_argument("--limit", type=int, default=int(os.getenv("HR_SHOW_LIMIT", "20")),
+                        help="展示总条数上限（默认20，可用 env HR_SHOW_LIMIT 覆盖）")
+    parser.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
+    parser.add_argument("--keywords", default=os.getenv("HR_FILTER_KEYWORDS", "人力资源"),
+                        help="关键词，逗号/空格/分号分隔（默认：人力资源）")
+    parser.add_argument("--require-all", action="store_true",
+                        default=os.getenv("HR_REQUIRE_ALL", "0").strip().lower() in ("1","true","yes","y"),
+                        help="关键词需要全部命中（默认否）")
+    parser.add_argument("--only-today", action="store_true",
+                        default=os.getenv("HR_ONLY_TODAY", "1").strip().lower() in ("1","true","yes","y"),
+                        help="仅抓当天（默认是）")
+    parser.add_argument("--all", dest="only_today", action="store_false",
+                        help="抓取不限当天（会放宽日期判断）")
+    parser.add_argument("--max-per-source", type=int, default=int(os.getenv("HR_MAX_ITEMS", "10")),
+                        help="单站最大抓取条数（默认10，可用 env HR_MAX_ITEMS 覆盖）")
+    return parser.parse_args()
+
+def split_keywords(s: str) -> list[str]:
+    return [k.strip() for k in re.split(r"[,\s，；;|]+", s or "") if k.strip()]
 
 DEFAULT_SELECTORS = [
     ".list li", ".news-list li", ".content-list li", ".box-list li",
@@ -140,9 +181,13 @@ def as_list(env_name: str, defaults: list[str]) -> list[str]:
 
 # ====================== HRLoo 专抓 ======================
 class HRLooCrawler:
-    def __init__(self):
+    def __init__(self, only_today: bool, require_all: bool, keywords: list[str], max_per_source: int):
         self.session = make_session()
         self.results, self._seen = [], set()
+        self.only_today = only_today
+        self.require_all = require_all
+        self.keywords = [k.lower() for k in keywords]
+        self.max_per_source = max_per_source
 
     def crawl_hrloo(self):
         urls = as_list("SRC_HRLOO_URLS", ["https://www.hrloo.com/"])
@@ -154,44 +199,44 @@ class HRLooCrawler:
         selectors = selectors or DEFAULT_SELECTORS
         total = 0
         for url in list_urls:
-            if total >= HR_MAX_PER_SOURCE: break
+            if total >= self.max_per_source: break
             try:
                 resp = self.session.get(url, timeout=(6.1, 20))
                 resp.encoding = resp.apparent_encoding or resp.encoding or "utf-8"
-                if resp.status_code != 200: 
+                if resp.status_code != 200:
                     continue
                 soup = BeautifulSoup(resp.text, "html.parser")
                 items = []
                 for css in selectors:
                     items = soup.select(css)
                     if items: break
-                if not items: 
+                if not items:
                     items = soup.select("a")
                 for node in items:
-                    if total >= HR_MAX_PER_SOURCE: break
+                    if total >= self.max_per_source: break
                     a = node if getattr(node, "name", None) == "a" else node.find("a")
-                    if not a: 
+                    if not a:
                         continue
                     title = norm(a.get_text())
-                    if not title: 
+                    if not title:
                         continue
                     href = a.get("href") or ""
                     full_url = urljoin(base or url, href)
 
                     # 解析日期（只识别“今天/刚刚/xx分钟前/标准日期格式”等）
                     date_text = self._find_date(node) or self._find_date(a)
-                    if HR_ONLY_TODAY and (not date_text or not self._is_today(date_text)): 
+                    if self.only_today and (not date_text or not self._is_today(date_text)):
                         continue
 
                     snippet = self._snippet(node)
-                    if not self._hit_keywords(title, snippet): 
+                    if not self._hit_keywords(title, snippet):
                         continue
 
                     item = {
-                        "title": title, 
-                        "url": full_url, 
-                        "source": source_name, 
-                        "date": date_text, 
+                        "title": title,
+                        "url": full_url,
+                        "source": source_name,
+                        "date": date_text,
                         "content": snippet
                     }
                     if self._push_if_new(item):
@@ -202,7 +247,7 @@ class HRLooCrawler:
     # 工具函数
     def _push_if_new(self, item: dict) -> bool:
         key = item.get("url") or f"{item.get('title','')}|{item.get('date','')}"
-        if key in self._seen: 
+        if key in self._seen:
             return False
         self._seen.add(key)
         self.results.append(item)
@@ -220,20 +265,20 @@ class HRLooCrawler:
     def _find_date(self, node) -> str:
         if not node: return ""
         raw = node.get_text(" ", strip=True)
-        if re.search(r"(刚刚|分钟|小时前|今日|今天)", raw): 
+        if re.search(r"(刚刚|分钟|小时前|今日|今天)", raw):
             return now_tz().strftime("%Y-%m-%d")
         m_rel = re.search(r"(\d+)\s*(分钟|小时)前", raw)
-        if m_rel: 
+        if m_rel:
             return now_tz().strftime("%Y-%m-%d")
         m_today_hm = re.search(r"今天\s*\d{1,2}:\d{1,2}", raw)
-        if m_today_hm: 
+        if m_today_hm:
             return now_tz().strftime("%Y-%m-%d")
         normtxt = raw.replace("年","-").replace("月","-").replace("日","-").replace("/", "-").replace(".", "-")
         m = re.search(r"(20\d{2}|19\d{2})-(\d{1,2})-(\d{1,2})", normtxt)
-        if m: 
+        if m:
             return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         m2 = re.search(r"\b(\d{1,2})-(\d{1,2})\b", normtxt)
-        if m2: 
+        if m2:
             return f"{now_tz().year:04d}-{int(m2.group(1)):02d}-{int(m2.group(2)):02d}"
         return ""
 
@@ -243,11 +288,11 @@ class HRLooCrawler:
         for fmt in ("%Y-%m-%d", "%y-%m-%d", "%Y-%m", "%m-%d"):
             try:
                 dt = datetime.strptime(s, fmt)
-                if fmt == "%m-%d": 
+                if fmt == "%m-%d":
                     dt = dt.replace(year=now_tz().year)
-                if fmt == "%y-%m-%d" and dt.year < 2000: 
+                if fmt == "%y-%m-%d" and dt.year < 2000:
                     dt = dt.replace(year=2000 + dt.year % 100)
-                return dt.replace(tzinfo=ZoneInfo(HR_TZ_STR))
+                return dt.replace(tzinfo=ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai").strip()))
             except ValueError:
                 continue
         return None
@@ -257,14 +302,13 @@ class HRLooCrawler:
         return bool(dt and dt.date() == now_tz().date())
 
     def _hit_keywords(self, title: str, content: str) -> bool:
-        if not HR_KEYWORDS: 
+        # 无关键词则不过滤
+        if not self.keywords:
             return True
-        hay = (title or "") + " " + (content or "")
-        hay_low = hay.lower()
-        kws_low = [k.lower() for k in HR_KEYWORDS]
-        if HR_REQUIRE_ALL:
-            return all(k in hay_low for k in kws_low)
-        return any(k in hay_low for k in kws_low)
+        hay_low = ((title or "") + " " + (content or "")).lower()
+        if self.require_all:
+            return all(k in hay_low for k in self.keywords)
+        return any(k in hay_low for k in self.keywords)
 
 # ====================== 构建推送正文（仅 HRLoo） ======================
 def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
@@ -298,13 +342,18 @@ def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
 
 # ====================== 运行入口 ======================
 def main():
-    parser = argparse.ArgumentParser(description="人力资源每日资讯推送")
-    parser.add_argument("--tz", default=os.getenv("HR_TZ", "Asia/Shanghai"), help="时区（默认Asia/Shanghai）")
-    parser.add_argument("--limit", type=int, default=20, help="展示总条数上限（默认20）")
-    parser.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
-    args = parser.parse_args()
+    args = parse_args()
+    # 运行参数汇总打印（便于在 Actions 日志中诊断）
+    print(f"[CFG] tz={args.tz} limit={args.limit} only_today={args.only_today} "
+          f"max_per_source={args.max_per_source} require_all={args.require_all} "
+          f"keywords={args.keywords!r}")
 
-    crawler = HRLooCrawler()
+    crawler = HRLooCrawler(
+        only_today=args.only_today,
+        require_all=args.require_all,
+        keywords=split_keywords(args.keywords),
+        max_per_source=args.max_per_source,
+    )
     crawler.crawl_hrloo()
     items = crawler.results or []
     print(f"[HRLoo] 抓到 {len(items)} 条。")
@@ -314,7 +363,10 @@ def main():
     print(md)
 
     if not args.no_push:
-        send_dingtalk_markdown("早安资讯｜人力资源资讯推送", md)
+        ok = send_dingtalk_markdown("早安资讯｜人力资源资讯推送", md)
+        print(f"[Push] DingTalk success={ok}")
+    else:
+        print("[Push] no-push 模式，跳过发送。")
 
 if __name__ == "__main__":
     main()
