@@ -3,7 +3,6 @@ name: HR News (Multi-site + HRLoo)
 on:
   workflow_dispatch: {}
   schedule:
-    # 每天 23:30 UTC ≈ 北京时间次日 07:30
     - cron: "30 23 * * *"
 
 jobs:
@@ -12,20 +11,17 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # —— 时区与过滤参数 ——
       HR_TZ: Asia/Shanghai
       HR_ONLY_TODAY: "1"
       HR_FILTER_KEYWORDS: "人力资源,社保,用工"
       HR_REQUIRE_ALL: "0"
       HR_MAX_ITEMS: "15"
+      SRC_HRLOO_URLS: "https://www.hrloo.com/"
 
-      # —— 钉钉 (A 尾缀版本) ——
+      # 用 A 尾缀的 Secrets
       DINGTALK_BASEA: ${{ secrets.DINGTALK_BASEA }}
       DINGTALK_SECRETA: ${{ secrets.DINGTALK_SECRETA }}
       DINGTALK_KEYWORD: "HR资讯"
-
-      # —— 三茅入口（可多URL用逗号分隔） ——
-      SRC_HRLOO_URLS: "https://www.hrloo.com/"
 
     steps:
       - name: Checkout
@@ -39,14 +35,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 urllib3 backports.zoneinfo
+          pip install requests beautifulsoup4 urllib3 tzdata
 
-      # 原来的多站点爬虫（如果不用可以注释掉）
       - name: Run HR multi-site crawler
         run: |
           python hr_news_crawler.py hr --limit 20 || echo "HR multi-site failed, continuing..."
 
-      # 三茅专抓版（你那份脚本）
       - name: Run HRLoo-only (三茅人力资源网)
         run: |
           python hr_hrloo_only.py --limit 20
