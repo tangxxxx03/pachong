@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）爬虫 · 干净版（仅保留人力资讯小标题 + 24小时 + 关键词过滤）
+HRLoo（三茅人力资源网）爬虫 · 超干净版（24小时 + 关键词过滤 + 噪声清除）
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
-from bs4 import BeautifulSoup, Comment
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timedelta
 from urllib3.util.retry import Retry
@@ -74,9 +74,14 @@ class HRLooCrawler:
         self.max_items = 15
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
-        self.keywords = [k.strip() for k in os.getenv("HR_FILTER_KEYWORDS", "人力资源, 社保, 员工, 用工, 劳动").split(",") if k.strip()]
-        # 🚫 黑名单关键词（过滤广告内容）
-        self.noise_words = ["手机", "验证码", "诈骗", "短信", "信号", "客服", "用户", "举报", "登录", "app", "公告"]
+
+        # ✅ 关键词白名单（只抓这些相关的）
+        self.keywords = [k.strip() for k in os.getenv("HR_FILTER_KEYWORDS", "人力资源, 社保, 员工, 用工, 劳动, 招聘, 工资, 缴费").split(",") if k.strip()]
+        # 🚫 噪声关键词（遇到这些就删）
+        self.noise_words = [
+            "手机", "短信", "验证码", "诈骗", "举报", "运营商", "黑名单", "安全", "app", 
+            "客服", "充值", "密码", "封号", "信号", "注销", "注册", "账号", "广告", "下载"
+        ]
 
     def crawl(self):
         base = "https://www.hrloo.com/"
@@ -113,7 +118,7 @@ class HRLooCrawler:
             # 发布时间
             pub_dt = self._extract_pub_time(soup)
 
-            # 提取小标题（排除杂项）
+            # 提取小标题（过滤垃圾）
             titles = []
             for t in soup.find_all(["strong","h2","h3","span","p"]):
                 text = norm(t.get_text())
@@ -167,12 +172,12 @@ def build_md(items):
     return "\n".join(out)
 
 
-# ========= 入口 =========
+# ========= 主入口 =========
 if __name__ == "__main__":
-    print("执行 hr_news_crawler.py（干净版）")
+    print("执行 hr_news_crawler.py（超干净版）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("早安资讯｜三茅人力资源干净版", md)
+    send_dingtalk_markdown("早安资讯｜三茅人力资源超干净版", md)
