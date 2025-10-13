@@ -11,8 +11,8 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
 # —— 内置默认的钉钉机器人（若仓库里未配置 Secrets，就用这里的值）——
-DEFAULT_DINGTALK_BASE   = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
-DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
+DEFAULT_DINGTALK_BASE   = "https://oapi.dingtalk.com/robot/send?access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
+DEFAULT_DINGTALK_SECRET = "SEC4d9521a7cf6f96fcf6ea9832116df97b13300441f4e513f487a6502d833def75"
 
 try:
     from zoneinfo import ZoneInfo
@@ -49,13 +49,11 @@ def _mask(v: str, head=6, tail=6):
 def send_dingtalk_markdown(title, md):
     # ✅ 优先用 Secrets / 环境变量；缺省时回落到代码内置默认值
     base = (
-        os.getenv("DINGTALK_BASEA")
-        or os.getenv("DINGTALK_BASE")
+        os.getenv("DINGTALK_BASE")
         or DEFAULT_DINGTALK_BASE
     )
     secret = (
-        os.getenv("DINGTALK_SECRETA")
-        or os.getenv("DINGTALK_SECRET")
+        os.getenv("DINGTALK_SECRET")
         or DEFAULT_DINGTALK_SECRET
     )
 
