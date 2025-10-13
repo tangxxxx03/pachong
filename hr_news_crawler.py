@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）爬虫 · 仅提取小标题（24小时内）
-- 自动识别发布时间，仅抓取24小时内发布的新闻
-- 从每篇文章中提取分节标题（1、2、3…），不抓正文
-- 可选钉钉推送
+HRLoo（三茅人力资源网）爬虫 · 仅提取小标题（24小时内 + 关键词过滤）
+- 自动识别发布时间，仅抓取24小时内发布的新闻；
+- 仅提取分节小标题（1、2、3…），不抓正文；
+- 支持关键词过滤（默认：人力资源, 社保, 员工, 用工, 劳动）；
+- 支持钉钉推送。
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
@@ -78,6 +79,9 @@ class HRLooCrawler:
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
 
+        # 🔍关键词过滤（可改）
+        self.keywords = [k.strip() for k in os.getenv("HR_FILTER_KEYWORDS", "人力资源, 社保, 员工, 用工, 劳动").split(",") if k.strip()]
+
     def crawl(self):
         base = "https://www.hrloo.com/"
         r = self.session.get(base, timeout=20)
@@ -93,6 +97,9 @@ class HRLooCrawler:
             pub_dt, titles, main_title = self._fetch_detail_24h_titles(url)
             if not pub_dt or not within_24h(pub_dt): continue
             if not titles: continue
+            # 🔍关键词过滤
+            if not self._match_keywords(main_title, titles):
+                continue
             self.results.append({"title": main_title or url, "url": url, "date": pub_dt.strftime("%Y-%m-%d %H:%M"), "titles": titles})
             print(f"[OK] {url} {pub_dt} 小标题{len(titles)}个")
             if len(self.results) >= self.max_items: break
@@ -135,13 +142,22 @@ class HRLooCrawler:
             return datetime(y, mo, d, hh, mm, tzinfo=tz)
         except: return None
 
+    def _match_keywords(self, title, subtitles):
+        if not self.keywords: return True
+        hay = (title or "") + " " + " ".join(subtitles)
+        for kw in self.keywords:
+            if kw in hay:
+                return True
+        return False
+
 
 # ========= 输出 =========
 def build_md(items):
     now = now_tz()
-    out = [f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**", "", "**标题：早安资讯｜人力资源24小时内新闻**", "", "**主要内容**"]
+    out = [f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**", "",
+           "**标题：早安资讯｜人力资源关键词资讯（24小时内）**", "", "**主要内容**"]
     if not items:
-        out.append("> 24小时内无内容。")
+        out.append("> 24小时内无符合关键词的内容。")
         return "\n".join(out)
     for i, it in enumerate(items, 1):
         out.append(f"{i}. [{it['title']}]({it['url']}) （{it['date']}）")
@@ -153,10 +169,10 @@ def build_md(items):
 
 # ========= 主入口 =========
 if __name__ == "__main__":
-    print("执行 hr_news_crawler.py（24小时内小标题版）")
+    print("执行 hr_news_crawler.py（24小时内 + 关键词过滤）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("早安资讯｜三茅24小时新闻", md)
+    send_dingtalk_markdown("早安资讯｜三茅24小时关键词新闻", md)
