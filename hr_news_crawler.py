@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from datetime import datetime, timedelta
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+
 # —— 内置默认的钉钉机器人（若仓库里未配置 Secrets，就用这里的值）——
 DEFAULT_DINGTALK_BASE   = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
 DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
@@ -28,7 +29,11 @@ def within_24h(dt): return (now_tz() - dt).total_seconds() <= 86400 if dt else F
 
 # ========= 钉钉 =========
 def _sign_webhook(base, secret):
-    if not base or not secret: return ""
+    if not base:
+        return ""
+    if not secret:
+        # 没开“加签”的机器人也可以直接用 base
+        return base
     ts = str(round(time.time() * 1000))
     s = f"{ts}\n{secret}".encode("utf-8")
     h = hmac.new(secret.encode("utf-8"), s, hashlib.sha256).digest()
@@ -36,17 +41,44 @@ def _sign_webhook(base, secret):
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}timestamp={ts}&sign={sign}"
 
+def _mask(v: str, head=6, tail=6):
+    if not v: return ""
+    if len(v) <= head + tail: return v
+    return v[:head] + "..." + v[-tail:]
+
 def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASEA")
-    secret = os.getenv("DINGTALK_SECRETA")
+    # ✅ 优先用 Secrets / 环境变量；缺省时回落到代码内置默认值
+    base = (
+        os.getenv("DINGTALK_BASEA")
+        or os.getenv("DINGTALK_BASE")
+        or DEFAULT_DINGTALK_BASE
+    )
+    secret = (
+        os.getenv("DINGTALK_SECRETA")
+        or os.getenv("DINGTALK_SECRET")
+        or DEFAULT_DINGTALK_SECRET
+    )
+
+    # 简单校验
     if not base or "REPLACE_ME" in base:
-        print("🔕 未配置钉钉 Webhook，跳过推送。")
+        print("🔕 未配置钉钉 Webhook（base 为空或为占位值），跳过推送。")
         return False
+
     webhook = _sign_webhook(base, secret)
-    r = requests.post(webhook, json={"msgtype": "markdown", "markdown": {"title": title, "text": md}}, timeout=20)
-    ok = (r.status_code == 200 and r.json().get("errcode") == 0)
-    print("DingTalk:", ok)
-    return ok
+    try:
+        r = requests.post(
+            webhook,
+            json={"msgtype": "markdown", "markdown": {"title": title, "text": md}},
+            timeout=20,
+        )
+        ok = (r.status_code == 200 and r.json().get("errcode") == 0)
+        print(f"DingTalk push={ok}  base={_mask(base)}  secret={_mask(secret)}  http={r.status_code}")
+        if not ok:
+            print("DingTalk resp:", r.text[:300])
+        return ok
+    except Exception as e:
+        print("DingTalk error:", e)
+        return False
 
 
 # ========= 网络 =========
@@ -82,7 +114,7 @@ class HRLooCrawler:
         self.keywords = [k.strip() for k in os.getenv("HR_FILTER_KEYWORDS", "人力资源, 社保, 员工, 用工, 劳动, 招聘, 工资, 缴费").split(",") if k.strip()]
         # 🚫 噪声关键词（遇到这些就删）
         self.noise_words = [
-            "手机", "短信", "验证码", "诈骗", "举报", "运营商", "黑名单", "安全", "app", 
+            "手机", "短信", "验证码", "诈骗", "举报", "运营商", "黑名单", "安全", "app",
             "客服", "充值", "密码", "封号", "信号", "注销", "注册", "账号", "广告", "下载"
         ]
 
@@ -125,7 +157,7 @@ class HRLooCrawler:
             titles = []
             for t in soup.find_all(["strong","h2","h3","span","p"]):
                 text = norm(t.get_text())
-                if not re.match(r"^\d+\s*[、.．]\s*.+", text): 
+                if not re.match(r"^\d+\s*[、.．]\s*.+", text):
                     continue
                 if any(n in text for n in self.noise_words):  # 🚫 屏蔽垃圾内容
                     continue
