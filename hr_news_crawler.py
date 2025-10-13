@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）专抓版 · 抓取正文+摘要
+HRLoo（三茅人力资源网）专抓版 · 抓取正文 + 摘要 + 分节小标题
 - 仅抓取 HRLoo；支持当天过滤、关键词过滤；进入详情页抓正文并推送钉钉
+- 自动提取文章内部小标题（如“1、xxx / 1. xxx”），在 Markdown 中展示
 - 兼容多套钉钉变量名：DINGTALK_BASEA / DINGTALK_WEBHOOKA / DINGTALK_BASE / DINGTALK_WEBHOOK
                        DINGTALK_SECRETA / DINGTALK_SECRET
 - 主要环境变量：
@@ -9,14 +10,14 @@ HRLoo（三茅人力资源网）专抓版 · 抓取正文+摘要
     HR_ONLY_TODAY=1              # 仅抓当天（1/0）
     HR_FILTER_KEYWORDS="人力资源,社保,用工"
     HR_REQUIRE_ALL=0             # 关键词需全部命中（1）或任一命中（0）
-    HR_MAX_ITEMS=10              # 单站最大抓取条数（列表页）
+    HR_MAX_ITEMS=10              # 列表页单站最大抓取条数
     HR_SHOW_LIMIT=20             # Markdown 展示上限
     SRC_HRLOO_URLS="https://www.hrloo.com/"
 
     HR_FETCH_DETAIL=1            # 是否抓详情页（1/0）
-    HR_DETAIL_MAXCHARS=1200      # 详情正文抓取的最大字符数（超出会截断）
+    HR_DETAIL_MAXCHARS=1200      # 详情正文抓取最大字符数
     HR_DETAIL_TIMEOUT="6.0,20"   # 连接/读取超时（秒），格式 "connect,read"
-    HR_DETAIL_SLEEP=0.8          # 每篇详情抓取后的休眠秒数（限速防封）
+    HR_DETAIL_SLEEP=0.8          # 每篇详情抓取后的休眠秒数（限速）
 
 - CLI 可覆盖：--limit --keywords --require-all --only-today/--all --max-per-source
 """
@@ -59,9 +60,7 @@ def get_env_any(names: list[str], default: str = "") -> str:
     return default.strip()
 
 # ====================== DingTalk 统一配置（多名兼容） ======================
-DEFAULT_DINGTALK_WEBHOOK = (
-    "https://oapi.dingtalk.com/robot/send?access_token=REPLACE_ME"
-)
+DEFAULT_DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=REPLACE_ME"
 DEFAULT_DINGTALK_SECRET  = "SEC_REPLACE_ME"
 
 DINGTALK_BASE = get_env_any(
@@ -140,7 +139,7 @@ def now_tz():
 
 # ====================== 参数 & 解析 ======================
 def parse_args():
-    parser = argparse.ArgumentParser(description="人力资源每日资讯推送（HRLoo 专抓+正文）")
+    parser = argparse.ArgumentParser(description="人力资源每日资讯推送（HRLoo 专抓 + 正文 + 小标题）")
     parser.add_argument("--tz", default=os.getenv("HR_TZ", "Asia/Shanghai"))
     parser.add_argument("--limit", type=int, default=int(os.getenv("HR_SHOW_LIMIT", "20")))
     parser.add_argument("--no-push", action="store_true")
@@ -179,7 +178,6 @@ class HRLooCrawler:
         # 详情配置
         self.fetch_detail = os.getenv("HR_FETCH_DETAIL", "1").strip().lower() in ("1","true","yes","y")
         self.detail_maxchars = int(os.getenv("HR_DETAIL_MAXCHARS", "1200"))
-        # 超时配置 "connect,read"
         tconf = (os.getenv("HR_DETAIL_TIMEOUT", "6.0,20").split(",") + ["6.0","20"])[:2]
         try:
             self.detail_timeout = (float(tconf[0]), float(tconf[1]))
@@ -191,7 +189,7 @@ class HRLooCrawler:
         urls = as_list("SRC_HRLOO_URLS", ["https://www.hrloo.com/"])
         self._crawl_generic("三茅人力资源网", "https://www.hrloo.com", urls)
 
-    # 通用抓取：只用于 HRLoo
+    # 列表页抓取
     def _crawl_generic(self, source_name: str, base: str | None, list_urls: list[str], selectors=None):
         if not list_urls: return
         selectors = selectors or DEFAULT_SELECTORS
@@ -221,21 +219,18 @@ class HRLooCrawler:
                     href = a.get("href") or ""
                     full_url = urljoin(base or url, href)
 
-                    # 日期
+                    # 日期判断
                     date_text = self._find_date(node) or self._find_date(a)
                     if self.only_today and (not date_text or not self._is_today(date_text)):
                         continue
 
-                    # 初步摘要（列表节点）
                     list_snippet = self._snippet(node)
-
                     if not self._hit_keywords(title, list_snippet):
                         continue
 
-                    detail_text = ""
-                    detail_summary = ""
+                    detail_text, detail_summary, subtitles = "", "", []
                     if self.fetch_detail:
-                        detail_text, detail_summary = self._fetch_detail(full_url)
+                        detail_text, detail_summary, subtitles = self._fetch_detail(full_url)
                         time.sleep(self.detail_sleep)
 
                     item = {
@@ -245,32 +240,33 @@ class HRLooCrawler:
                         "date": date_text,
                         "content": detail_text or list_snippet,
                         "summary": detail_summary or self._first_sentences(list_snippet, 2),
+                        "subtitles": subtitles,
                     }
                     if self._push_if_new(item):
                         total += 1
             except Exception:
                 continue
 
-    # 详情抓取
-    def _fetch_detail(self, url: str) -> tuple[str, str]:
+    # 详情抓取：正文 + 摘要 + 小标题列表
+    def _fetch_detail(self, url: str) -> tuple[str, str, list[str]]:
         try:
             r = self.session.get(url, timeout=self.detail_timeout)
             r.encoding = r.apparent_encoding or r.encoding or "utf-8"
             if r.status_code != 200:
-                return "", ""
-            soup = BeautifulSoup(r.text, "html.parser")
+                return "", "", []
 
-            # 去掉脚本/样式/注释
+            soup = BeautifulSoup(r.text, "html.parser")
+            # 去除脚本/样式/注释
             for tag in soup(["script", "style", "noscript"]):
                 tag.decompose()
             for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
                 c.extract()
 
-            # 常见正文容器（按优先级）
+            # 常见正文容器（优先）
             candidates = [
-                ".article", ".article-content", ".article-body", ".news-content",
-                ".post-content", ".content", ".entry-content", "#content", "#article",
-                ".article_box", ".neirong", ".detail", ".detail-content"
+                ".article-content", ".news-content", ".content", ".detail",
+                ".article", ".article_box", ".neirong", ".main-content",
+                ".entry-content", ".post-content", "#article", "#content"
             ]
             node = None
             for css in candidates:
@@ -278,20 +274,25 @@ class HRLooCrawler:
                 if node and norm(node.get_text()):
                     break
             if not node:
-                # 兜底：页面中最长文本块
-                blocks = soup.find_all(["div","section","article","main"])
-                node = max(blocks, key=lambda n: len(norm(n.get_text() or "")), default=None)
+                node = soup
 
-            text = norm(node.get_text(" ")) if node else ""
-            if not text:
-                return "", ""
+            # —— 提取分节小标题（匹配“1、xxx / 1. xxx / 1．xxx”）——
+            subtitles = []
+            for h in node.find_all(["h2", "h3", "h4", "strong", "b"]):
+                text = norm(h.get_text())
+                if re.match(r"^\d+\s*[、.．]\s*.+", text):
+                    subtitles.append(text)
+
+            # —— 提取正文文本（裁剪到最大长度）——
+            text = norm(node.get_text(" "))
             text = text[: self.detail_maxchars].strip()
 
-            # 摘要：取前 2~3 句
+            # 摘要
             summary = self._first_sentences(text, 3, hard_limit=220)
-            return text, summary
-        except Exception:
-            return "", ""
+            return text, summary, subtitles
+        except Exception as e:
+            print("Detail fetch error:", e)
+            return "", "", []
 
     # 工具函数
     def _push_if_new(self, item: dict) -> bool:
@@ -358,16 +359,14 @@ class HRLooCrawler:
 
     @staticmethod
     def _first_sentences(text: str, n: int = 2, hard_limit: int = 180) -> str:
-        """粗略按句号/换行切句，取前 n 句；再做硬截断以避免过长。"""
         if not text: return ""
-        # 以中文/英文句号、问号、叹号、分号、换行切分
         parts = re.split(r"[。！？；.!?;\n\r]+", text)
         parts = [p.strip() for p in parts if p.strip()]
         summary = "。".join(parts[:max(1, n)])
         summary = (summary[:hard_limit] + "…") if len(summary) > hard_limit else summary
         return summary
 
-# ====================== 构建推送正文（附摘要+节选） ======================
+# ====================== 构建推送正文（附摘要 + 小标题 + 节选） ======================
 def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
     tz = ZoneInfo(tz_str)
     now_dt = datetime.now(tz)
@@ -395,8 +394,12 @@ def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
 
         if it.get("summary"):
             lines.append(f"> 摘要：{it['summary']}")
+        # 分节小标题
+        if it.get("subtitles"):
+            for st in it["subtitles"]:
+                lines.append(f"> 🟦 {st}")
+        # 正文节选
         if it.get("content"):
-            # 给正文节选再来一段，避免过长
             excerpt = it["content"][:300].rstrip()
             lines.append(f"> 正文节选：{excerpt}{'…' if len(it['content'])>300 else ''}")
         lines.append("")
