@@ -1,9 +1,9 @@
-name: HR News（人力资源净化版）
+name: HR News（三茅人力资源网净化版）
 
 on:
   workflow_dispatch: {}
   schedule:
-    # 每天北京时间 07:30 运行（GitHub 为 UTC，换算为 23:30）
+    # 每天北京时间早上07:30运行（UTC时间23:30）
     - cron: "30 23 * * *"
 
 jobs:
@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # —— 运行参数 ——（当前脚本只使用 HR_FILTER_KEYWORDS，其他保留不影响）
+      # —— 脚本参数 ——（只使用关键词筛选，其他可保留不影响）
       HR_TZ: Asia/Shanghai
       HR_ONLY_TODAY: "1"
       HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
@@ -37,7 +37,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 urllib3 backports.zoneinfo tzdata
+          # ✅ Py3.11 自带 zoneinfo，无需 backports
+          pip install requests beautifulsoup4 urllib3 tzdata
 
       - name: Run HRLoo-only（三茅人力资源网）
         run: |
