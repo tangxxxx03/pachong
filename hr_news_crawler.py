@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）爬虫 · 仅提取小标题（24小时内 + 关键词过滤）
-- 自动识别发布时间，仅抓取24小时内发布的新闻；
-- 仅提取分节小标题（1、2、3…），不抓正文；
-- 支持关键词过滤（默认：人力资源, 社保, 员工, 用工, 劳动）；
-- 支持钉钉推送。
+HRLoo（三茅人力资源网）爬虫 · 干净版（仅保留人力资讯小标题 + 24小时 + 关键词过滤）
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
@@ -20,7 +16,7 @@ except:
     from backports.zoneinfo import ZoneInfo
 
 
-# ========= 基础工具 =========
+# ========= 基础函数 =========
 def norm(s): return re.sub(r"\s+", " ", (s or "").strip())
 def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 def now_tz(): return datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -50,7 +46,7 @@ def send_dingtalk_markdown(title, md):
     return ok
 
 
-# ========= 网络请求 =========
+# ========= 网络 =========
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
         ctx = ssl.create_default_context()
@@ -78,9 +74,9 @@ class HRLooCrawler:
         self.max_items = 15
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
-
-        # 🔍关键词过滤（可改）
         self.keywords = [k.strip() for k in os.getenv("HR_FILTER_KEYWORDS", "人力资源, 社保, 员工, 用工, 劳动").split(",") if k.strip()]
+        # 🚫 黑名单关键词（过滤广告内容）
+        self.noise_words = ["手机", "验证码", "诈骗", "短信", "信号", "客服", "用户", "举报", "登录", "app", "公告"]
 
     def crawl(self):
         base = "https://www.hrloo.com/"
@@ -94,36 +90,40 @@ class HRLooCrawler:
         for url in links:
             if url in seen: continue
             seen.add(url)
-            pub_dt, titles, main_title = self._fetch_detail_24h_titles(url)
+            pub_dt, titles, main_title = self._fetch_detail_clean(url)
             if not pub_dt or not within_24h(pub_dt): continue
             if not titles: continue
-            # 🔍关键词过滤
-            if not self._match_keywords(main_title, titles):
-                continue
+            if not self._match_keywords(main_title, titles): continue
             self.results.append({"title": main_title or url, "url": url, "date": pub_dt.strftime("%Y-%m-%d %H:%M"), "titles": titles})
             print(f"[OK] {url} {pub_dt} 小标题{len(titles)}个")
             if len(self.results) >= self.max_items: break
             time.sleep(self.detail_sleep)
 
-    def _fetch_detail_24h_titles(self, url):
+    def _fetch_detail_clean(self, url):
         try:
             r = self.session.get(url, timeout=self.detail_timeout)
             if r.status_code != 200: return None, [], ""
             r.encoding = r.apparent_encoding or "utf-8"
             soup = BeautifulSoup(r.text, "html.parser")
 
-            # 标题
+            # 主标题
             h = soup.find(["h1", "h2"])
             page_title = norm(h.get_text()) if h else ""
 
             # 发布时间
             pub_dt = self._extract_pub_time(soup)
 
-            # 小标题 strong/h2/h3/span.bjh-p
+            # 提取小标题（排除杂项）
             titles = []
             for t in soup.find_all(["strong","h2","h3","span","p"]):
                 text = norm(t.get_text())
-                if re.match(r"^\d+\s*[、.．]\s*.+", text) and text not in titles:
+                if not re.match(r"^\d+\s*[、.．]\s*.+", text): 
+                    continue
+                if any(n in text for n in self.noise_words):  # 🚫 屏蔽垃圾内容
+                    continue
+                if len(text) < 6 or len(text) > 60:  # 排除太短或太长的句子
+                    continue
+                if text not in titles:
                     titles.append(text)
             return pub_dt, titles, page_title
         except Exception as e:
@@ -151,7 +151,7 @@ class HRLooCrawler:
         return False
 
 
-# ========= 输出 =========
+# ========= Markdown 输出 =========
 def build_md(items):
     now = now_tz()
     out = [f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**", "",
@@ -167,12 +167,12 @@ def build_md(items):
     return "\n".join(out)
 
 
-# ========= 主入口 =========
+# ========= 入口 =========
 if __name__ == "__main__":
-    print("执行 hr_news_crawler.py（24小时内 + 关键词过滤）")
+    print("执行 hr_news_crawler.py（干净版）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("早安资讯｜三茅24小时关键词新闻", md)
+    send_dingtalk_markdown("早安资讯｜三茅人力资源干净版", md)
