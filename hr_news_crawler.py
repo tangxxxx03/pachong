@@ -42,8 +42,8 @@ DEFAULT_DINGTALK_WEBHOOK = (
 )
 DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
-DINGTALK_BASE   = os.getenv("DINGTALK_BASE", DEFAULT_DINGTALK_WEBHOOK).strip()
-DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", DEFAULT_DINGTALK_SECRET).strip()
+DINGTALK_BASE   = os.getenv("DINGTALK_BASEA", DEFAULT_DINGTALK_WEBHOOK).strip()
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRETA", DEFAULT_DINGTALK_SECRET).strip()
 DINGTALK_KEYWORD = os.getenv("DINGTALK_KEYWORD", "").strip()
 
 def _sign_webhook(base_webhook: str, secret: str) -> str:
@@ -298,7 +298,7 @@ def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
 
 # ====================== 运行入口 ======================
 def main():
-    parser = argparse.ArgumentParser(description="HRLoo（三茅）专抓推送")
+    parser = argparse.ArgumentParser(description="人力资源每日资讯推送")
     parser.add_argument("--tz", default=os.getenv("HR_TZ", "Asia/Shanghai"), help="时区（默认Asia/Shanghai）")
     parser.add_argument("--limit", type=int, default=20, help="展示总条数上限（默认20）")
     parser.add_argument("--no-push", action="store_true", help="只打印不推送钉钉")
@@ -314,7 +314,7 @@ def main():
     print(md)
 
     if not args.no_push:
-        send_dingtalk_markdown("早安资讯｜三茅人力资源网", md)
+        send_dingtalk_markdown("早安资讯｜人力资源资讯推送", md)
 
 if __name__ == "__main__":
     main()
