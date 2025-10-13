@@ -278,7 +278,7 @@ def build_markdown(hr_items: list[dict], tz_str: str, total_limit: int = 20):
     lines = [
         f"**日期：{today_str}（{wd}）**",
         "",
-        f"**标题：早安资讯｜三茅人力资源网**",
+        f"**标题：早安资讯｜人力资源每日资讯推送**",
         "",
         "**主要内容**",
     ]
