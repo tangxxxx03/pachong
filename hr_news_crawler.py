@@ -194,17 +194,26 @@ class HRLooCrawler:
 # ========= Markdown 输出 =========
 def build_md(items):
     now = now_tz()
-    out = [f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**", "",
-           "**标题：早安资讯｜人力资源每日资讯推送**", "", "**主要内容**"]
+    out = []
+    out.append(f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**  ")
+    out.append("")
+    out.append(f"**标题：早安资讯｜人力资源每日资讯推送**  ")
+    out.append("")
+    out.append(f"**主要内容**  ")
+    out.append("")
+
     if not items:
         out.append("> 24小时内无符合关键词的内容。")
         return "\n".join(out)
+
     for i, it in enumerate(items, 1):
-        out.append(f"{i}. [{it['title']}]({it['url']}) （{it['date']}）")
+        out.append(f"{i}. [{it['title']}]({it['url']}) （{it['date']}）  ")
         for s in it['titles']:
-            out.append(f"> 🟦 {s}")
-        out.append("")
+            out.append(f"> 🟦 {s}  ")
+        out.append("")  # 每条资讯之间空一行
+
     return "\n".join(out)
+
 
 
 # ========= 主入口 =========
