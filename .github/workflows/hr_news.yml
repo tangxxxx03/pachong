@@ -21,8 +21,8 @@ jobs:
       SRC_HRLOO_URLS: "https://www.hrloo.com/"
 
       # —— 钉钉 webhook（优先取 Secrets，未配时脚本会用你代码里的默认值）——
-      DINGTALK_BASEA: ${{ secrets.DINGTALK_BASEA }}
-      DINGTALK_SECRETA: ${{ secrets.DINGTALK_SECRETA }}
+      DINGTALK_BASEA: ${{ secrets.DINGTALK_BASE }}
+      DINGTALK_SECRETA: ${{ secrets.DINGTALK_SECRET }}
       DINGTALK_KEYWORD: "早安讯"
 
     steps:
