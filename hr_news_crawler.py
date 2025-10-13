@@ -45,8 +45,8 @@ def _sign_webhook(base, secret):
     return f"{base}{sep}timestamp={ts}&sign={sign}"
 
 def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASEA") or os.getenv("DINGTALK_BASE")
-    secret = os.getenv("DINGTALK_SECRETA") or os.getenv("DINGTALK_SECRET")
+    base = os.getenv("DINGTALK_BASEA")
+    secret = os.getenv("DINGTALK_SECRETA")
     webhook = _sign_webhook(base, secret)
     if not webhook:
         print("🔕 未配置钉钉 Webhook，跳过推送。")
