@@ -9,6 +9,9 @@ from urllib.parse import urljoin
 from datetime import datetime, timedelta
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
+# —— 内置默认的钉钉机器人（若仓库里未配置 Secrets，就用这里的值）——
+DEFAULT_DINGTALK_BASE   = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+DEFAULT_DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
 try:
     from zoneinfo import ZoneInfo
