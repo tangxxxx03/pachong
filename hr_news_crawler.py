@@ -60,11 +60,11 @@ def get_env_any(names: list[str], default: str = "") -> str:
     return default.strip()
 
 # ====================== DingTalk 统一配置（多名兼容） ======================
-DEFAULT_DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=REPLACE_ME"
-DEFAULT_DINGTALK_SECRET  = "SEC_REPLACE_ME"
+DEFAULT_DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+DEFAULT_DINGTALK_SECRET  = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
 DINGTALK_BASE = get_env_any(
-    ["DINGTALK_BASEA", "DINGTALK_WEBHOOKA", "DINGTALK_BASE", "DINGTALK_WEBHOOK"],
+    ["DINGTALK_BASEA", "DINGTALK_WEBHOOKA" ],
     DEFAULT_DINGTALK_WEBHOOK
 )
 DINGTALK_SECRET = get_env_any(["DINGTALK_SECRETA", "DINGTALK_SECRET"], DEFAULT_DINGTALK_SECRET)
