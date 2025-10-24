@@ -1,1 +1,7 @@
+name: "HR News (Fixed Sections, No Keywords)"
 
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub Actions 使用 UTC，这里设为每天 23:30 UTC = 北京时间次日 07:30
+    - cron: "30 23 * * *"
