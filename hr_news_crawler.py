@@ -144,66 +144,32 @@ class HRLooCrawler:
             return None,[], ""
 
     # —— 只保留真正新闻标题，剔除广告提示 —— #
-def _extract_daily_item_titles(self, root):
-    # —— 广告/提示黑词：一旦命中并且已开始收集（见 collecting），立即停止 —— #
-    ad_words = [
-        "手机","境外","短信","验证码","审核","粉丝","入群","账号","APP","登录",
-        "推广","广告","创建申请","协议","关注","申诉","下载","网盘","失信","封号"
-    ]
+    def _extract_daily_item_titles(self, root):
+        ad_words = [
+            "手机","境外","短信","验证码","审核","粉丝","入群","账号","APP","登录",
+            "推广","广告","创建申请","协议","关注","申诉","下载","网盘","失信","封号"
+        ]
+        by_num = {}
+        for t in root.find_all(["h2","h3","h4","strong","b","p","li","span","div"]):
+            raw = (t.get_text() or "").strip()
+            if not raw: continue
+            m = re.match(r"^\s*[（(]?\s*(\d{1,2})\s*[)）]?\s*[、.．]?\s*(.+)$", raw)
+            if not m: continue
+            num, txt = int(m.group(1)), m.group(2).strip()
+            # 日期型和广告跳过
+            if num >= 10 or txt.startswith("日，") or txt.startswith("日 "): continue
+            if any(w in txt for w in ad_words): continue
+            title = re.split(r"[（\(]{1}", txt)[0].strip()
+            if not (4 <= len(title) <= 60): continue
+            zh_ratio = len(re.findall(r"[\u4e00-\u9fa5]", title)) / max(len(title),1)
+            if zh_ratio < 0.3: continue
+            by_num.setdefault(num, title)
 
-    by_num = {}          # num -> 首次出现的标题
-    collecting = False   # 见到“1.”后才开始收集；收集过程中若命中广告 => 立刻 break
-
-    for t in root.find_all(["h2","h3","h4","strong","b","p","li","span","div"]):
-        raw = (t.get_text() or "").strip()
-        if not raw:
-            continue
-
-        m = re.match(r"^\s*[（(]?\s*(\d{1,2})\s*[)）]?\s*[、.．]?\s*(.+)$", raw)
-        if not m:
-            continue
-
-        num = int(m.group(1))
-        txt = m.group(2).strip()
-
-        # —— 若已开始收集且命中广告词：立即停止后续抓取 —— #
-        if collecting and any(w in txt for w in ad_words):
-            break
-        # 未开始收集时，广告段直接跳过
-        if not collecting and any(w in txt for w in ad_words):
-            continue
-
-        # —— 过滤日期型误判与异常编号 —— #
-        if num >= 10 or txt.startswith("日，") or txt.startswith("日 "):
-            continue
-
-        # 标题保留“：”后的主体，不截断；仅去括注/尾注
-        title = re.split(r"[（\(]{1}", txt)[0].strip()
-
-        # 基础过滤
-        if not (1 <= num <= 9):
-            continue
-        if not (4 <= len(title) <= 60):
-            continue
-        zh_ratio = len(re.findall(r"[\u4e00-\u9fa5]", title)) / max(len(title), 1)
-        if zh_ratio < 0.3:
-            continue
-
-        # 见到第 1 条，开始“连续编号收集模式”
-        if num == 1:
-            collecting = True
-
-        by_num.setdefault(num, title)
-
-    # —— 从 1 开始连续聚合；遇缺位即停 —— #
-    seq, n = [], 1
-    while n in by_num:
-        seq.append(by_num[n])
-        n += 1
-        if n > 20:
-            break
-    return seq[:10]
-
+        seq=[]; n=1
+        while n in by_num:
+            seq.append(by_num[n]); n+=1
+            if n>20: break
+        return seq[:10]
 
 # ========= Markdown 输出 =========
 def build_md(items):
