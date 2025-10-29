@@ -3,8 +3,8 @@ name: "HR News (Fixed Sections, No Keywords)"
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions 使用 UTC，这里设为每天 23:30 UTC = 北京时间次日 07:30
-    - cron: "30 23 * * *"
+    # 每天北京时间 09:00 运行（UTC 01:00）
+    - cron: "0 1 * * *"
 
 jobs:
   run:
@@ -25,33 +25,26 @@ jobs:
 
       - name: Run HR news
         env:
-          # —— 时间策略：脚本内部已固定“抓昨天” —— 
           AUTO_RANGE: "true"
-
-          # —— 抓取参数 —— 
           PAGES: "3"
           LIMIT: "60"
           DELAY: "0.8"
 
-          # —— 钉钉（A 版 Secrets）——
+          # ✅ 钉钉 webhook 在仓库 Secrets 中定义（A 版）
           DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRET }}
 
           NO_PUSH: "false"
         run: |
-          # 关闭代理，避免被 runner 环境干扰
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
           set -e
 
           echo "[Info] Python: $(python --version)"
           echo "[Info] Now (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "[Info] Target push window: 07:30 (Asia/Shanghai)"
-
-          ls -la
+          echo "[Info] Target push window: 09:00 (Asia/Shanghai)"
 
           CMD="python hr_news_auto_range.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
           if [ "${AUTO_RANGE}" = "true" ]; then
-            # 按脚本逻辑：恒定“抓昨天”，无需额外参数
             CMD="${CMD} --auto-range"
           else
             CMD="${CMD} --window-hours \"${WINDOW_HOURS:-48}\""
