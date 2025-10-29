@@ -1,29 +1,56 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）爬虫 · 三茅日报专抓版（24小时 + 关键词白名单 + 强力去噪 + 合并去重）
-仅抓取标题中包含【三茅日报】的新闻，忽略其它所有资讯。
+HRLoo（三茅人力资源网）· 三茅日报专抓版
+功能：
+  1) 仅抓取标题包含「三茅日报/三茅日報」的新闻；
+  2) 从正文中抽取“1、… 2、…”等编号条目的【标题】；
+  3) 仅保留当天（HR_ONLY_TODAY=1）或近24h（默认）；
+  4) 生成 Markdown，并推送到钉钉机器人（可选）。
+
+环境变量（可选）：
+  HR_TZ=Asia/Shanghai
+  HR_ONLY_TODAY=1/0   # 1=只要当天；0=近24小时（默认）
+  HR_MAX_ITEMS=15
+  SRC_HRLOO_URLS=https://www.hrloo.com/   # 可扩展多个，以逗号分隔
+  DINGTALK_BASE / DINGTALK_SECRET         # 标准变量名
+  DINGTALK_BASEA / DINGTALK_SECRETA       # 兼容你的 Actions 配置
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
-# ====== 时区 ======
+# ====== 时区与时间 ======
 try:
     from zoneinfo import ZoneInfo
 except:
-    from backports.zoneinfo import ZoneInfo
+    from backports.zoneinfo import ZoneInfo  # 仅旧版 Python 需要
 
-# ========= 小工具 =========
-def norm(s): return re.sub(r"\s+", " ", (s or "").strip())
-def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
-def now_tz(): return datetime.now(ZoneInfo("Asia/Shanghai"))
-def within_24h(dt): return (now_tz() - dt).total_seconds() <= 86400 if dt else False
+def tz():
+    return ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai"))
 
-# ========= 钉钉 =========
+def now_tz():
+    return datetime.now(tz())
+
+def norm(s): 
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+def zh_weekday(dt):
+    return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
+
+def within_24h(dt):
+    if not dt: return False
+    return (now_tz() - dt).total_seconds() <= 86400
+
+def same_day(dt):
+    if not dt: return False
+    n = now_tz().date()
+    return dt.astimezone(tz()).date() == n
+
+# ====== 钉钉推送 ======
 def _sign_webhook(base, secret):
     if not base: return ""
     if not secret: return base
@@ -40,10 +67,11 @@ def _mask(v: str, head=6, tail=6):
     return v[:head] + "..." + v[-tail:]
 
 def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASE")      # 必填：无加签也可
-    secret = os.getenv("DINGTALK_SECRET")  # 选填：开启“加签”才需要
+    # 兼容两种变量名
+    base = os.getenv("DINGTALK_BASE") or os.getenv("DINGTALK_BASEA")
+    secret = os.getenv("DINGTALK_SECRET") or os.getenv("DINGTALK_SECRETA")
     if not base:
-        print("🔕 未配置 DINGTALK_BASE，跳过推送。")
+        print("🔕 未配置 DINGTALK_BASE/BASEA，跳过推送。")
         return False
     webhook = _sign_webhook(base, secret)
     try:
@@ -54,13 +82,14 @@ def send_dingtalk_markdown(title, md):
         )
         ok = (r.status_code == 200 and r.json().get("errcode") == 0)
         print(f"DingTalk push={ok} base={_mask(base)} http={r.status_code}")
-        if not ok: print("DingTalk resp:", r.text[:300])
+        if not ok:
+            print("DingTalk resp:", r.text[:300])
         return ok
     except Exception as e:
         print("DingTalk error:", e)
         return False
 
-# ========= 网络 =========
+# ====== 网络会话 ======
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
         ctx = ssl.create_default_context()
@@ -79,47 +108,40 @@ def make_session():
     s.mount("https://", LegacyTLSAdapter(max_retries=r))
     return s
 
-# ========= 主爬虫 =========
+# ====== 爬虫主体 ======
 class HRLooCrawler:
     def __init__(self):
         self.session = make_session()
         self.results = []
-        self.max_items = 15
+        self.max_items = int(os.getenv("HR_MAX_ITEMS", "15") or "15")
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
 
-        # —— 只允许“三茅日报”的标题 —— #
-        # 支持：三茅日报｜三茅日报 | 三茅日報（繁体）等
+        # 标题必须包含“三茅日报/三茅日報”
         self.daily_title_pat = re.compile(r"三茅日[报報]")
 
-        # —— 强力去噪词 —— #
-        self.noise_words = [
-            "手机","短信","验证码","诈骗","举报","运营商","黑名单","安全",
-            "客服","充值","密码","封号","信号","注销","注册","账号",
-            "广告","下载","扫码","二维码","关注","转发","抽奖","福利",
-            "直播","视频","评论","点赞","私信","礼包","优惠券"
-        ]
+        # 抓取入口（可逗号分隔多个）
+        src = os.getenv("SRC_HRLOO_URLS", "https://www.hrloo.com/").strip()
+        self.sources = [u.strip() for u in src.split(",") if u.strip()]
 
-        # —— 要点白名单 —— #
-        self.keep_words = [
-            "对象","适用","范围","城市","地区","地域","户籍","年龄","身份","条件","资格",
-            "金额","补贴","标准","比例","上限","下限","额度","享受","待遇",
-            "材料","证明","所需","提交","准备","清单",
-            "流程","步骤","方式","渠道","入口","平台","办理","申领","申请","登记","注册",
-            "时间","期限","截至","起止","执行时间",
-            "依据","政策","文件","通知","条款","解读",
-            "咨询","电话","窗口","地点","地址"
-        ]
+        # 时间策略：当天 or 近24h
+        self.only_today = (os.getenv("HR_ONLY_TODAY", "0") == "1")
 
-    # —— 对外入口 —— #
     def crawl(self):
-        base = "https://www.hrloo.com/"
+        for base in self.sources:
+            try:
+                self._crawl_source(base)
+            except Exception as e:
+                print(f"[SourceError] {base} -> {e}")
+
+    def _crawl_source(self, base):
         r = self.session.get(base, timeout=20)
         if r.status_code != 200:
-            print("首页请求失败", r.status_code); return
+            print("首页请求失败", base, r.status_code); 
+            return
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # 只收集“链接文本里就包含‘三茅日报’”的 a 标签，尽量减少无效请求
+        # 优先：a 文本里就包含“三茅日报”
         links = []
         for a in soup.select("a[href*='/news/']"):
             href = a.get("href", "")
@@ -129,7 +151,7 @@ class HRLooCrawler:
             if self.daily_title_pat.search(text or ""):
                 links.append(urljoin(base, href))
 
-        # 双保险：如果首页 a 文本未包含“三茅日报”，也允许少量回退抓取后在详情页再过滤
+        # 兜底：如果首页 a 文本没有明确包含，退回到全部 news 链接，去详情页二次判定
         if not links:
             links = [urljoin(base, a.get("href"))
                      for a in soup.select("a[href*='/news/']")
@@ -137,35 +159,44 @@ class HRLooCrawler:
 
         seen = set()
         for url in links:
-            if url in seen: 
+            if url in seen:
                 continue
             seen.add(url)
 
-            pub_dt, subtitles, main_title = self._fetch_detail_clean(url)
-            # —— 详情页再做一次“必须是三茅日报”的硬过滤 —— #
+            pub_dt, item_titles, main_title = self._fetch_detail_clean(url)
+
+            # 必须是“三茅日报”
             if not main_title or not self.daily_title_pat.search(main_title):
                 continue
-            if not pub_dt or not within_24h(pub_dt):
-                continue
-            if not subtitles:
+
+            # 时间过滤
+            if self.only_today:
+                if not same_day(pub_dt):
+                    continue
+            else:
+                if not within_24h(pub_dt):
+                    continue
+
+            if not item_titles:
                 continue
 
             self.results.append({
-                "title": main_title,
+                "title": norm(main_title),
                 "url": url,
-                "date": pub_dt.strftime("%Y-%m-%d %H:%M"),
-                "titles": subtitles
+                "date": pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else "",
+                "titles": item_titles
             })
-            print(f"[OK] {url} {pub_dt} 要点{len(subtitles)}个")
-            if len(self.results) >= self.max_items: 
+            print(f"[OK] {url} {pub_dt} 条目{len(item_titles)}个")
+            if len(self.results) >= self.max_items:
                 break
             time.sleep(self.detail_sleep)
 
-    # —— 明细页抽取 + 清洗 —— #
+    # —— 明细页抽取（日报标题 + 发布时间 + 条目标题列表） —— #
     def _fetch_detail_clean(self, url):
         try:
             r = self.session.get(url, timeout=self.detail_timeout)
-            if r.status_code != 200: return None, [], ""
+            if r.status_code != 200:
+                return None, [], ""
             r.encoding = r.apparent_encoding or "utf-8"
             soup = BeautifulSoup(r.text, "html.parser")
 
@@ -176,111 +207,93 @@ class HRLooCrawler:
             # 发布时间
             pub_dt = self._extract_pub_time(soup)
 
-            # 取“编号段落”（1. / 1、 / 一、 等）
-            raw = []
-            for t in soup.find_all(["strong","h2","h3","span","p","li"]):
-                text = norm(t.get_text())
-                if not text: 
-                    continue
-                if not re.match(r"^([（(]?\d+[)）]|[一二三四五六七八九十]+、|\d+\s*[、.．])\s*.+", text):
-                    continue
-                raw.append(text)
+            # 抽“编号条目”的标题
+            item_titles = self._extract_daily_item_titles(soup)
 
-            clean = self._clean_subtitles(raw)
-            return pub_dt, clean, page_title
+            return pub_dt, item_titles, page_title
         except Exception as e:
             print("[DetailError]", url, e)
             return None, [], ""
 
     def _extract_pub_time(self, soup):
-        tz = ZoneInfo("Asia/Shanghai")
         txt = soup.get_text(" ")
-        m = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2}))?", txt)
-        if not m: return None
+        # 匹配：2025-10-29 08:53 或 2025年10月29日 08:53
+        m = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:\D+(\d{1,2}):(\d{1,2}))?", txt)
+        if not m: 
+            return None
         y, mo, d = int(m[1]), int(m[2]), int(m[3])
         hh = int(m[4]) if m[4] else 9
         mm = int(m[5]) if m[5] else 0
         try:
-            return datetime(y, mo, d, hh, mm, tzinfo=tz)
+            return datetime(y, mo, d, hh, mm, tzinfo=tz())
         except:
             return None
 
-    # —— 只保留“有用信息”的清洗器 —— #
-    def _clean_subtitles(self, items):
-        out, seen = [], set()
-        for t in items:
-            # 去编号
-            t = re.sub(r"^([（(]?\d+[)）]|[一二三四五六七八九十]+、|\d+\s*[、.．])\s*", "", t)
-            t = norm(t)
+    # —— 从日报正文提取“1、… 2、…”的条目标题 —— #
+    def _extract_daily_item_titles(self, soup):
+        items = []
+        # 常见容器标签里找文本
+        for t in soup.find_all(["h2","h3","h4","strong","b","p","li","span","div"]):
+            raw = (t.get_text() or "").strip()
+            if not raw:
+                continue
+            # 允许的编号样式：1、xxx / 1. xxx / 1．xxx / （1）xxx / (1) xxx
+            m = re.match(r"^\s*(?:（?\(?\s*\d+\s*\)?）?)\s*[、.．]?\s*(.+)", raw)
+            if not m:
+                continue
+            title = m.group(1).strip()
 
-            # 长度阈值
-            if len(t) < 6 or len(t) > 50:
+            # 切掉可能跟着的解释/冒号后缀等，只留“标题短语”
+            title = re.split(r"[：:。]|（|（图|（详见|—|--|-{2,}", title)[0].strip()
+
+            # 过滤噪声与异常长度
+            if not (4 <= len(title) <= 60):
+                continue
+            # 中文占比（避免纯数字/链接噪声）
+            zh_ratio = len(re.findall(r"[\u4e00-\u9fa5]", title)) / max(len(title), 1)
+            if zh_ratio < 0.3:
                 continue
 
-            # 中文占比
-            zh_ratio = len(re.findall(r"[\u4e00-\u9fa5]", t)) / max(len(t),1)
-            if zh_ratio < 0.5:
+            items.append(title)
+
+        # 去重保序
+        seen = set()
+        uniq = []
+        for x in items:
+            k = x.replace(" ", "").lower()
+            if k in seen:
                 continue
+            seen.add(k)
+            uniq.append(x)
 
-            # 噪声词过滤
-            if any(w in t for w in self.noise_words):
-                continue
+        # 限制数量
+        return uniq[:15]
 
-            # “要点白名单”过滤
-            if not any(k in t for k in self.keep_words):
-                continue
-
-            # 归一化同义词
-            t = re.sub(r"(金额|补贴|标准|额度|比例)", "金额/标准", t)
-            t = re.sub(r"(条件|资格)", "申领条件", t)
-            t = re.sub(r"(材料|证明|所需)", "所需材料", t)
-            t = re.sub(r"(流程|步骤|办理|申请|申领|登记|渠道|入口|平台)", "办理流程/入口", t)
-            t = re.sub(r"(时间|期限|截至|起止)", "办理时间", t)
-            t = re.sub(r"(对象|适用|范围|城市|地区|地域|户籍|身份|年龄)", "适用对象/范围", t)
-            t = re.sub(r"(依据|政策|文件|通知|条款)", "政策依据", t)
-
-            # 去末尾标点
-            t = re.sub(r"[，。；、,.]+$", "", t)
-
-            # 去重
-            key = t.lower().replace(" ", "")
-            if key in seen: 
-                continue
-            seen.add(key)
-            out.append(t)
-
-            if len(out) >= 8:
-                break
-        return out
-
-# ========= Markdown 输出 =========
+# ====== Markdown 输出 ======
 def build_md(items):
-    now = now_tz()
+    n = now_tz()
     out = []
-    out.append(f"**日期：{now.strftime('%Y-%m-%d')}（{zh_weekday(now)}）**  ")
+    out.append(f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  ")
     out.append("")
-    out.append("**标题：每日资讯｜人力资源每日要点**  ")
+    out.append("**标题：每日资讯｜人力资源相关资讯**  ")
     out.append("")
-    out.append("**主要内容**  ")
-    out.append("")
-
     if not items:
-        out.append("> 24小时内未发现新的“三茅日报”。")
+        out.append("> 指定时间范围内未发现新的“三茅日报”。")
         return "\n".join(out)
 
     for i, it in enumerate(items, 1):
         out.append(f"{i}. [{it['title']}]({it['url']}) （{it['date']}）  ")
-        for s in it['titles']:
-            out.append(f"> 🟦 {s}  ")
+        for j, t in enumerate(it['titles'], 1):
+            out.append(f"> {j}. {t}  ")
         out.append("")
     return "\n".join(out)
 
-# ========= 主入口 =========
+# ====== 主入口 ======
 if __name__ == "__main__":
-    print("执行 hr_news_crawler_daily_only.py（仅抓“三茅日报”）")
+    print("执行 hr_news_crawler_daily_only.py（只抓“三茅日报”条目标题）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("每日资讯｜人力资源每日要点", md)
+    send_dingtalk_markdown("每日资讯｜人力资源相关资讯", md)
