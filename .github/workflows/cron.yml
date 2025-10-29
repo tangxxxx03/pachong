@@ -1,93 +1,67 @@
-name: Outsourcing/Dispatch Crawl (Weekdays 07:30 ET)
+name: "HR News (Fixed Sections, No Keywords)"
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
-    # GitHub Actions 的 cron 使用 UTC。
-    # 07:30 America/New_York ≈ 11:30 UTC（夏令时，约3月~11月）
-    # 冬令时（约11月~3月）07:30 ET ≈ 12:30 UTC
-    # 这里先固定到 11:30 UTC；若进入冬令时可把下面一行改为 12:30 UTC。
-    - cron: "30 11 * * 1-5"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: "outsourcing-crawl"
-  cancel-in-progress: false
-
-env:
-  # 你脚本里的开关、关键词等可在这里统一配置（也可在仓库 Secrets 里配）
-  KEYWORDS: "外包,派遣"
-  CRAWL_BEIJING: "true"
-  CRAWL_ZSXTZB: "true"
-  DUE_FILTER_DAYS: "30"
-  SKIP_EXPIRED: "true"
-  HEADLESS: "1"               # 无头浏览器
-  PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PYTHONUNBUFFERED: "1"
+    # 每天北京时间 09:00 运行（UTC 01:00）
+    - cron: "0 1 * * *"
 
 jobs:
-  run-crawler:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 安装 Chrome（Selenium Manager 会拉驱动，装好浏览器更稳）
-      - name: Install Google Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      # 常见无头依赖（确保某些环境下不缺库）
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libxss1 libasound2 libgbm1 \
-            fonts-liberation xdg-utils
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install Python deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          # 若仓库有 requirements.txt，优先用它；否则按需安装
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+          pip install requests beautifulsoup4 urllib3
+
+      - name: Run HR news
+        env:
+          AUTO_RANGE: "true"
+          PAGES: "3"
+          LIMIT: "60"
+          DELAY: "0.8"
+
+          # ✅ 直接写入钉钉 webhook（不再使用 Secrets）
+          DINGTALK_WEBHOOKA: "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
+          DINGTALK_SECRETA:  ""
+
+          NO_PUSH: "false"
+        run: |
+          unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+          set -e
+
+          echo "[Info] Python: $(python --version)"
+          echo "[Info] Now (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "[Info] Target push window: 09:00 (Asia/Shanghai)"
+
+          CMD="python hr_news_auto_range.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
+          if [ "${AUTO_RANGE}" = "true" ]; then
+            CMD="${CMD} --auto-range"
           else
-            pip install requests urllib3 pandas pdfplumber selenium webdriver-manager
+            CMD="${CMD} --window-hours \"${WINDOW_HOURS:-48}\""
+          fi
+          if [ "${NO_PUSH}" = "true" ]; then
+            CMD="${CMD} --no-push"
           fi
 
-      - name: Run crawler (Weekdays 07:30 ET)
-        env:
-          # 把你的钉钉 Webhook 放到仓库 Secrets：DINGTALK_WEBHOOK
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
-          KEYWORDS: ${{ env.KEYWORDS }}
-          CRAWL_BEIJING: ${{ env.CRAWL_BEIJING }}
-          CRAWL_ZSXTZB: ${{ env.CRAWL_ZSXTZB }}
-          DUE_FILTER_DAYS: ${{ env.DUE_FILTER_DAYS }}
-          SKIP_EXPIRED: ${{ env.SKIP_EXPIRED }}
-          HEADLESS: ${{ env.HEADLESS }}
-        run: |
-          python your_script.py
-          # 如果脚本文件名不是 this，请把上面改成你的实际文件名
+          echo "[Run] ${CMD}"
+          eval ${CMD} | tee hr_news.log
 
-      # 进入冬令时后的备用触发（可在 11月切换季节时把 schedule 改为 12:30 UTC）
-      - name: Note about DST
-        run: |
-          echo "当前定时为 11:30 UTC（对应夏令时 07:30 ET）。冬令时需把 cron 调为 12:30 UTC 以继续对应 07:30 ET。"
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hr-news-results
+          path: |
+            hr_news.log
+            hr_news.md
+          if-no-files-found: ignore
