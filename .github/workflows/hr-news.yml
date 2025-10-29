@@ -34,8 +34,8 @@ jobs:
           DELAY: "0.8"
 
           # —— 钉钉（A 版 Secrets）——
-          DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOKA }}
-          DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRETA }}
+          DINGTALK_WEBHOOKA: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRETA:  ${{ secrets.DINGTALK_SECRET }}
 
           NO_PUSH: "false"
         run: |
