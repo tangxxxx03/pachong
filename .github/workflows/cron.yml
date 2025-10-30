@@ -1,4 +1,4 @@
-name: "HR News (Fixed Sections, No Keywords)"
+name: "HR News (Auto Cron Runner)"
 
 on:
   workflow_dispatch:
@@ -12,18 +12,22 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # === 1. 拉取仓库代码 ===
       - uses: actions/checkout@v4
 
+      # === 2. 设置 Python 环境 ===
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      # === 3. 安装依赖 ===
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 urllib3
+          pip install -r requirements.txt
 
-      - name: Run HR news
+      # === 4. 执行主脚本（注意路径和命令）===
+      - name: Run HR News crawler
         env:
           AUTO_RANGE: "true"
           PAGES: "3"
@@ -32,18 +36,21 @@ jobs:
 
           # ✅ 直接写入钉钉 webhook（不再使用 Secrets）
           DINGTALK_WEBHOOKA: "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
-          DINGTALK_SECRETA:  ""
+          DINGTALK_SECRETA: ""
 
           NO_PUSH: "false"
         run: |
+          # 清理代理环境变量，防止推送失败
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
           set -e
 
           echo "[Info] Python: $(python --version)"
-          echo "[Info] Now (UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "[Info] Target push window: 09:00 (Asia/Shanghai)"
+          echo "[Info] Current UTC time: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "[Info] Target push time: 09:00 (Asia/Shanghai)"
 
-          CMD="python hr_news_auto_range.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
+          # === 调整执行文件路径 ===
+          CMD="python main.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
+
           if [ "${AUTO_RANGE}" = "true" ]; then
             CMD="${CMD} --auto-range"
           else
@@ -56,6 +63,7 @@ jobs:
           echo "[Run] ${CMD}"
           eval ${CMD} | tee hr_news.log
 
+      # === 5. 上传日志与结果文件 ===
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
