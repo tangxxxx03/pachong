@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 外包/派遣：招标 & 中标采集（北京公共资源交易平台 + zsxtzb.cn 搜索）
+—— 完整版（内置 DingTalk Webhook，不读取仓库 Settings/Secrets）
 """
 
-import os, re, time, math
+import os, re, time, math, hmac, base64, hashlib
 from datetime import datetime, timedelta
 import pandas as pd
 import pdfplumber
 from io import BytesIO
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote_plus
 
 # ========== HTTP 会话（禁用环境代理 + 重试） ==========
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-for _k in ('http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'):
+for _k in ('http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy','NO_PROXY'):
     os.environ.pop(_k, None)
 
 _SESSION = requests.Session()
@@ -31,28 +32,50 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
-# ================== 配置（可被环境变量覆盖） ==================
-DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "").strip()
-KEYWORDS = [k.strip() for k in os.getenv("KEYWORDS", "外包,派遣").split(",") if k.strip()]
-CRAWL_BEIJING = os.getenv("CRAWL_BEIJING", "true").lower() in ("1","true","yes","y")
-CRAWL_ZSXTZB  = os.getenv("CRAWL_ZSXTZB",  "true").lower() in ("1","true","yes","y")
-DUE_FILTER_DAYS = int(os.getenv("DUE_FILTER_DAYS", "30"))
-SKIP_EXPIRED = os.getenv("SKIP_EXPIRED", "true").lower() in ("1","true","yes","y")
-HEADLESS = os.getenv("HEADLESS", "1").lower() in ("1","true","yes","y")
-# ============================================================
+# ================== 固定配置（不读环境变量） ==================
+# —— 你的专用群机器人（与 Settings 里的区分开）——
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
+# 若开启“加签”，填入密钥；未开启则留空字符串
+DINGTALK_SECRET  = ""
 
-def send_to_dingtalk_markdown(title: str, md_text: str, webhook: str = None):
-    webhook = (webhook or DINGTALK_WEBHOOK).strip()
-    if not webhook.startswith("http"):
+# 其他可调参数（如需改动，直接改这里的常量）
+KEYWORDS        = ["外包", "派遣"]
+CRAWL_BEIJING   = True
+CRAWL_ZSXTZB    = True
+DUE_FILTER_DAYS = 30       # 仅保留未来 N 天内截止的招标；<=0 表示不过滤
+SKIP_EXPIRED    = True     # 丢弃已过期的招标
+HEADLESS        = True     # True 使用无头浏览器
+
+# ================== 加签与发送 ==================
+def _build_signed_webhook(base_url: str, secret: str) -> str:
+    """
+    若配置了 secret，按钉钉“自定义机器人-加签”规范，为 URL 追加 timestamp 与 sign。
+    sign = base64( HMAC_SHA256( secret, f"{timestamp}\n{secret}" ) )
+    """
+    base_url = (base_url or "").strip()
+    if not base_url or not secret:
+        return base_url
+    ts = str(int(time.time() * 1000))
+    string_to_sign = f"{ts}\n{secret}"
+    h = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
+    sign = quote_plus(base64.b64encode(h))
+    sep = "&" if ("?" in base_url) else "?"
+    return f"{base_url}{sep}timestamp={ts}&sign={sign}"
+
+def send_to_dingtalk_markdown(title: str, md_text: str):
+    base_webhook = (DINGTALK_WEBHOOK or "").strip()
+    if not base_webhook.startswith("http"):
         print("? Webhook 未配置或无效"); return
+    final_url = _build_signed_webhook(base_webhook, (DINGTALK_SECRET or "").strip())
     headers = {"Content-Type": "application/json"}
     data = {"msgtype": "markdown", "markdown": {"title": title, "text": md_text}}
     try:
-        resp = _SESSION.post(webhook, json=data, headers=headers, timeout=15)
+        resp = _SESSION.post(final_url, json=data, headers=headers, timeout=15)
         print("钉钉推送：", resp.status_code, resp.text[:180])
     except Exception as e:
         print("? 发送钉钉失败：", e)
 
+# ================== 常用小工具 ==================
 def get_date_range():
     today = datetime.now()
     if today.weekday() == 0:
@@ -572,15 +595,16 @@ def format_award_markdown(items, date_start, date_end):
         lines.append(f"- 发布时间：{md_escape(it.get('发布时间','暂无'))}")
     return "\n".join(lines)
 
-def split_and_send(title_prefix: str, full_text: str, webhook: str, chunk_size=4500):
+def split_and_send(title_prefix: str, full_text: str, chunk_size=4500):
     n = max(1, math.ceil(len(full_text) / chunk_size))
     for i in range(n):
         part = full_text[i*chunk_size:(i+1)*chunk_size]
         part_title = f"{title_prefix}（{i+1}/{n}）" if n > 1 else title_prefix
-        send_to_dingtalk_markdown(part_title, part, webhook)
+        send_to_dingtalk_markdown(part_title, part)
 
 # ================== MAIN ==================
 if __name__ == '__main__':
+    print("Webhook 状态：", "已配置（加签）" if (DINGTALK_WEBHOOK and DINGTALK_SECRET) else ("已配置" if DINGTALK_WEBHOOK else "未配置"))
     date_start, date_end = get_date_range()
     print(f"采集日期：{date_start} ~ {date_end}")
     all_bidding, all_award = [], []
@@ -598,13 +622,13 @@ if __name__ == '__main__':
         f"过滤策略：{'丢弃已过期' if SKIP_EXPIRED else '保留已过期'}；"
         f"{'仅保留未来 ' + str(DUE_FILTER_DAYS) + ' 天内' if DUE_FILTER_DAYS>0 else '不过滤未来天数'}。"
     )
-    send_to_dingtalk_markdown("外包/派遣采集汇总", summary, DINGTALK_WEBHOOK)
+    send_to_dingtalk_markdown("外包/派遣采集汇总", summary)
 
     if all_bidding:
         md_bid = format_bidding_markdown(all_bidding, date_start, date_end)
-        split_and_send("招标公告明细", md_bid, DINGTALK_WEBHOOK)
+        split_and_send("招标公告明细", md_bid)
     if all_award:
         md_awd = format_award_markdown(all_award, date_start, date_end)
-        split_and_send("中标结果明细", md_awd, DINGTALK_WEBHOOK)
+        split_and_send("中标结果明细", md_awd)
 
     print("✔ 完成")
