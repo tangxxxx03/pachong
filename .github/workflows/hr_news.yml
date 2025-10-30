@@ -24,8 +24,8 @@ jobs:
 
       # —— 钉钉（⚠️ 名称要与脚本一致）——
       # 脚本里调用 os.getenv("DINGTALK_BASE") / os.getenv("DINGTALK_SECRET")
-      DINGTALK_BASE: ${{ secrets.DINGTALK_BAS }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRE }}
+      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
 
     steps:
       - name: Checkout code
