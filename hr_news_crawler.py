@@ -10,7 +10,7 @@ HRLoo（三茅人力资源网）· 三茅日报净化版
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from datetime import datetime
+from datetime import datetime, timedelta   # ✅ 增加 timedelta
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -183,12 +183,13 @@ def build_md(items):
         out.append("> 未发现新的“三茅日报”。")
         return "\n".join(out)
 
-    # 对每个日报：只列新闻项，从 1 开始编号；最后附“查看详细”链接
+    # 显示新闻项（从 1 开始），尾部“查看详细”后的日期固定为昨天
+    date_yesterday = (now_tz() - timedelta(days=1)).strftime("%Y-%m-%d")  # ✅ 仅显示前一天
     for it in items:
         for j, t in enumerate(it['titles'], 1):
             out.append(f"{j}. {t}  ")
-        out.append(f"[查看详细]({it['url']}) （{it['date']}）  ")
-        out.append("")  # 空行分隔
+        out.append(f"[查看详细]({it['url']}) （{date_yesterday}）  ")
+        out.append("")
     return "\n".join(out)
 
 # ========= 主入口 =========
