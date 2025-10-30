@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # === 1. 拉取仓库代码 ===
+      # === 1. 拉取仓库 ===
       - uses: actions/checkout@v4
 
       # === 2. 设置 Python 环境 ===
@@ -20,27 +20,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      # === 3. 安装依赖 ===
+      # === 3. 安装依赖（含 pandas） ===
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests beautifulsoup4 urllib3 lxml selenium webdriver-manager pdfplumber pandas
 
-      # === 4. 执行主脚本（注意路径和命令）===
+      # === 4. 运行主脚本 ===
       - name: Run HR News crawler
         env:
           AUTO_RANGE: "true"
           PAGES: "3"
           LIMIT: "60"
           DELAY: "0.8"
-
-          # ✅ 直接写入钉钉 webhook（不再使用 Secrets）
+          # ✅ 直接写入钉钉 webhook
           DINGTALK_WEBHOOKA: "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
           DINGTALK_SECRETA: ""
-
           NO_PUSH: "false"
         run: |
-          # 清理代理环境变量，防止推送失败
+          # 清理代理变量，防止推送失败
           unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
           set -e
 
@@ -48,9 +46,7 @@ jobs:
           echo "[Info] Current UTC time: $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "[Info] Target push time: 09:00 (Asia/Shanghai)"
 
-          # === 调整执行文件路径 ===
           CMD="python main.py --pages \"${PAGES}\" --delay \"${DELAY}\" --limit \"${LIMIT}\""
-
           if [ "${AUTO_RANGE}" = "true" ]; then
             CMD="${CMD} --auto-range"
           else
@@ -63,7 +59,7 @@ jobs:
           echo "[Run] ${CMD}"
           eval ${CMD} | tee hr_news.log
 
-      # === 5. 上传日志与结果文件 ===
+      # === 5. 上传运行日志 ===
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
