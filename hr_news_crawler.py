@@ -156,7 +156,6 @@ class HRLooCrawler:
             m = re.match(r"^\s*[（(]?\s*(\d{1,2})\s*[)）]?\s*[、.．]?\s*(.+)$", raw)
             if not m: continue
             num, txt = int(m.group(1)), m.group(2).strip()
-            # 日期型和广告跳过
             if num >= 10 or txt.startswith("日，") or txt.startswith("日 "): continue
             if any(w in txt for w in ad_words): continue
             title = re.split(r"[（\(]{1}", txt)[0].strip()
@@ -173,23 +172,31 @@ class HRLooCrawler:
 
 # ========= Markdown 输出 =========
 def build_md(items):
-    n=now_tz()
-    out=[f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  ","","**标题：人资早报｜每日要点**  ",""]
+    n = now_tz()
+    out = [
+        f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  ",
+        "",
+        "**标题：人资早报｜每日要点**  ",
+        ""
+    ]
     if not items:
-        out.append("> 未发现新的“三茅日报”。"); return "\n".join(out)
-    for i,it in enumerate(items,1):
-        out.append(f"{i}. [{it['title']}]({it['url']}) （{it['date']}）  ")
-        for j,t in enumerate(it['titles'],1):
-            out.append(f"> {j}. {t}  ")
-        out.append("")
+        out.append("> 未发现新的“三茅日报”。")
+        return "\n".join(out)
+
+    # 对每个日报：只列新闻项，从 1 开始编号；最后附“查看详细”链接
+    for it in items:
+        for j, t in enumerate(it['titles'], 1):
+            out.append(f"{j}. {t}  ")
+        out.append(f"[查看详细]({it['url']}) （{it['date']}）  ")
+        out.append("")  # 空行分隔
     return "\n".join(out)
 
 # ========= 主入口 =========
 if __name__=="__main__":
     print("执行 hr_news_crawler_daily_clean_adfree.py（广告过滤版）")
-    c=HRLooCrawler()
+    c = HRLooCrawler()
     c.crawl()
-    md=build_md(c.results)
+    md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("人资早报｜每日要点",md)
+    send_dingtalk_markdown("人资早报｜每日要点", md)
