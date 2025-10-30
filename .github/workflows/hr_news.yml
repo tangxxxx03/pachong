@@ -44,4 +44,4 @@ jobs:
       - name: Run HRLoo-only（三茅人力资源网）
         run: |
           echo "执行 hr_news_crawler_minimal.py（仅保留要点）"
-          python hr_news_crawler_minimal.py
+          python hr_news_crawler.py
