@@ -3,7 +3,7 @@ name: HR News（三茅人力资源网净化版）
 on:
   workflow_dispatch: {}
   schedule:
-    # 每天北京时间 09:00 运行（UTC 01:00）
+    # 每天北京时间 09:00 运行（GitHub Actions 用 UTC）
     - cron: "0 1 * * *"
 
 jobs:
@@ -11,19 +11,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # 这里的 env 会传递到后续所有 steps 的进程环境
     env:
-      # —— 脚本参数 ——（只使用关键词筛选，其他可保留不影响）
+      # —— 脚本参数 ——（保留你的设置）
       HR_TZ: Asia/Shanghai
       HR_ONLY_TODAY: "1"
       HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
       HR_REQUIRE_ALL: "0"
       HR_MAX_ITEMS: "15"
       SRC_HRLOO_URLS: "https://www.hrloo.com/"
-
-      # —— 钉钉 webhook（优先取 Secrets，未配时脚本会用你代码里的默认值）——
-      DINGTALK_BASEA: ${{ secrets.DINGTALK_BASEA }}
-      DINGTALK_SECRETA: ${{ secrets.DINGTALK_SECRETA }}
       DINGTALK_KEYWORD: "早安资讯"
+
+      # —— 钉钉（⚠️ 名称要与脚本一致）——
+      # 脚本里调用 os.getenv("DINGTALK_BASE") / os.getenv("DINGTALK_SECRET")
+      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
 
     steps:
       - name: Checkout code
@@ -37,10 +39,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # ✅ Py3.11 自带 zoneinfo，无需 backports
           pip install requests beautifulsoup4 urllib3 tzdata
 
       - name: Run HRLoo-only（三茅人力资源网）
         run: |
-          echo "执行 hr_news_crawler.py"
-          python hr_news_crawler.py
+          echo "执行 hr_news_crawler_minimal.py（仅保留要点）"
+          python hr_news_crawler_minimal.py
