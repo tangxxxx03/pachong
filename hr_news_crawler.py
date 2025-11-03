@@ -312,7 +312,7 @@ def build_md(items):
     out = [
         f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  ",
         "",
-        "**标题：人资早报｜每日要点**  ",
+        "**标题：人资日报｜每日要点**  ",
         ""
     ]
     if not items:
@@ -335,4 +335,4 @@ if __name__ == "__main__":
     md = build_md(c.results)
     print("\n===== Markdown Preview =====\n")
     print(md)
-    send_dingtalk_markdown("人资早报｜每日要点", md)
+    send_dingtalk_markdown("人资日报｜每日要点", md)
