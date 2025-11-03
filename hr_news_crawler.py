@@ -335,7 +335,7 @@ def build_md(items):
     it = items[0]  # 当天仅一条
     for idx, t in enumerate(it["titles"], 1):
         out.append(f"{idx}. {t}  ")
-    out.append(f"[查看详细]({it['url']}) （{it['date'][:10]}）  ")
+    out.append(f"[查看详细]({it['url']})  ")
     return "\n".join(out)
 
 # ========== 主入口 ==========
