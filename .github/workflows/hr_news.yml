@@ -19,8 +19,8 @@ jobs:
       HR_MAX_ITEMS: "15"
       SRC_HRLOO_URLS: "https://www.hrloo.com/"
       DINGTALK_KEYWORD: "早安资讯"
-      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      DINGTALK_BASE: ${{ secrets.DINGTALK_BAS }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRE }}
 
     steps:
       - name: Checkout code
