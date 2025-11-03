@@ -1,10 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）· 三茅日报净化版（只取目标日期 & 去阅读量）
-- 仅抓取“三茅日报”
-- 只保留正文编号标题（1、2、3、…），自动剔除广告/提示/阅读量
-- 支持 HR_ONLY_TODAY=1 或 HR_TARGET_DATE=YYYY-MM-DD
+HRLoo（三茅人力资源网）· 三茅日报净化版（只抓当天一条｜去阅读量｜命中即停）
+
+功能要点
+- 仅抓取“三茅日报”当日那一条资讯（或 HR_TARGET_DATE 指定的那一天）
+- 从正文提取编号标题（1、2、3、…），自动剔除广告/提示/阅读量尾巴
+- 命中后立即停止继续抓取，避免混入其它日期
 - 输出 Markdown，可推送钉钉
+
+环境变量（GitHub Actions env:）
+- HR_ONLY_TODAY: "1"  → 只要脚本运行当天（默认开启）
+- HR_TARGET_DATE: "YYYY-MM-DD" → 指定目标日期（设置后优先生效）
+- HR_MAX_ITEMS: 默认 "1"（这里仍保留，做双保险）
+- SRC_HRLOO_URLS: 站点列表，逗号分隔，默认 "https://www.hrloo.com/"
+- DINGTALK_BASE / DINGTALK_SECRET（或 *_BASEA / *_SECRETA）用于推送
+
+建议 Actions 配置：
+  HR_ONLY_TODAY: "1"
+  HR_MAX_ITEMS:  "1"
+  SRC_HRLOO_URLS: "https://www.hrloo.com/"
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
@@ -77,12 +91,15 @@ class HRLooCrawler:
     def __init__(self):
         self.session = make_session()
         self.results = []
-        self.max_items = int(os.getenv("HR_MAX_ITEMS", "15") or "15")
+
+        # 默认就只抓当天一条；如需宽松可在 env 覆盖
+        self.max_items = int(os.getenv("HR_MAX_ITEMS", "1") or "1")
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
 
         # 仅当天 or 指定目标日期
-        self.only_today = (os.getenv("HR_ONLY_TODAY", "0") == "1")
+        # 若设置了 HR_TARGET_DATE，则严格只取该日；否则 HR_ONLY_TODAY 默认开启
+        self.only_today = (os.getenv("HR_ONLY_TODAY", "1") == "1")
         target = (os.getenv("HR_TARGET_DATE") or "").strip()
         self.target_date = None
         if target:
@@ -98,6 +115,8 @@ class HRLooCrawler:
     def crawl(self):
         for base in self.sources:
             self._crawl_source(base)
+            if self.results:  # 命中即停
+                break
 
     def _crawl_source(self, base):
         r = self.session.get(base, timeout=20)
@@ -106,12 +125,14 @@ class HRLooCrawler:
             return
         soup = BeautifulSoup(r.text, "html.parser")
 
+        # 先挑标题里就带“三茅日报”的
         links = []
         for a in soup.select("a[href*='/news/']"):
             href, text = a.get("href", ""), norm(a.get_text())
             if re.search(r"/news/\d+\.html$", href) and self.daily_title_pat.search(text):
                 links.append(urljoin(base, href))
 
+        # 兜底：没在首页标题命中，也把新闻详情链接收集，交给详情页判定
         if not links:
             links = [urljoin(base, a.get("href"))
                      for a in soup.select("a[href*='/news/']")
@@ -119,7 +140,7 @@ class HRLooCrawler:
 
         seen = set()
         for url in links:
-            if url in seen: 
+            if url in seen:
                 continue
             seen.add(url)
 
@@ -130,6 +151,7 @@ class HRLooCrawler:
                 continue
 
             pub_d = pub_dt.date()
+
             # —— 目标日期过滤 —— #
             if self.target_date:
                 if pub_d != self.target_date:
@@ -138,7 +160,7 @@ class HRLooCrawler:
                 if pub_d != now_tz().date():
                     continue
             else:
-                # 放宽 36 小时窗口也许会混入前一天；此分支用于不限制日期时
+                # 宽松窗口：36h（通常不会走到这里，因为默认 only_today 已开启）
                 if (now_tz() - pub_dt).total_seconds() > 36 * 3600:
                     continue
 
@@ -152,9 +174,8 @@ class HRLooCrawler:
                 "titles": titles
             })
             print(f"[OK] {url} -> {len(titles)} 条")
-            if len(self.results) >= self.max_items:
-                break
-            time.sleep(self.detail_sleep)
+            break  # 命中该站点的当天三茅日报后立即停止
+            # 若希望同站点还有其它“分时发布”的同日日报，可把上行 break 去掉，并靠 max_items 控制
 
     # —— 稳健发布时间提取 —— #
     def _extract_pub_time(self, soup):
@@ -238,16 +259,14 @@ class HRLooCrawler:
             "推广","广告","创建申请","协议","关注","申诉","下载","网盘","失信","封号"
         ]
 
-        # 去阅读量：若出现在句尾或“ · ”后
         def strip_views(title: str) -> str:
             t = title
             # 统一一下分隔点
             t = re.sub(r"[·•·‧∙⋅・●◦]\s*", " · ", t).strip()
-
-            # 去掉“ · 5k 阅读 / 1200 次阅读 / 1.2万阅读 / 阅读量：xxx”
+            # 去掉“ · 5k 阅读 / 1200 次阅读 / 1.2万阅读 / 阅读量：xxx / …阅读”
             t = re.sub(r"(?:^|[\s·|｜:-])\s*\d+(?:\.\d+)?\s*(?:k|K|万)?\s*(?:次)?阅读\s*$", "", t)
             t = re.sub(r"(?:阅读量)\s*[:：]?\s*\d+(?:\.\d+)?\s*(?:k|K|万)?\s*$", "", t)
-            t = re.sub(r"\s*阅读\s*$", "", t)  # 兜底：尾部孤立的“阅读”
+            t = re.sub(r"\s*阅读\s*$", "", t)  # 兜底：尾部孤立“阅读”
             return t.strip(" 、，,.;。；|-—~… ")
 
         by_num = {}
@@ -303,7 +322,6 @@ def build_md(items):
     for it in items:
         for j, t in enumerate(it["titles"], 1):
             out.append(f"{j}. {t}  ")
-        # 使用真实发布时间的日期（YYYY-MM-DD）
         real_date = (it.get("date") or "")[:10]
         out.append(f"[查看详细]({it['url']}) （{real_date}）  ")
         out.append("")
@@ -311,7 +329,7 @@ def build_md(items):
 
 # ========= 主入口 =========
 if __name__ == "__main__":
-    print("执行 hr_news_crawler_daily_clean_adfree.py（目标日期 & 去阅读量版）")
+    print("执行 hr_news_crawler_daily_clean_adfree.py（只抓当天一条｜去阅读量｜命中即停）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
