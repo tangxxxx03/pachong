@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-HRLoo（三茅人力资源网）· 三茅日报净化版（稳健版）
+HRLoo（三茅人力资源网）· 三茅日报净化版（只取目标日期 & 去阅读量）
 - 仅抓取“三茅日报”
-- 提取正文内编号标题（1、2、3、…）
-- 自动识别并剔除广告/提示信息（手机、境外、APP、审核等）
+- 只保留正文编号标题（1、2、3、…），自动剔除广告/提示/阅读量
+- 支持 HR_ONLY_TODAY=1 或 HR_TARGET_DATE=YYYY-MM-DD
 - 输出 Markdown，可推送钉钉
 """
 
 import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -24,8 +24,6 @@ def _tz(): return ZoneInfo("Asia/Shanghai")
 def now_tz(): return datetime.now(_tz())
 def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 def norm(s): return re.sub(r"\s+", " ", (s or "").strip())
-def within_24h(dt): return (now_tz() - dt).total_seconds() <= 36 * 3600 if dt else False  # 放宽到 36h
-def same_day(dt): return bool(dt) and dt.astimezone(_tz()).date() == now_tz().date()
 
 # ========= 钉钉推送 =========
 def _sign_webhook(base, secret):
@@ -82,7 +80,18 @@ class HRLooCrawler:
         self.max_items = int(os.getenv("HR_MAX_ITEMS", "15") or "15")
         self.detail_timeout = (6, 20)
         self.detail_sleep = 0.6
-        self.only_today = os.getenv("HR_ONLY_TODAY", "0") == "1"
+
+        # 仅当天 or 指定目标日期
+        self.only_today = (os.getenv("HR_ONLY_TODAY", "0") == "1")
+        target = (os.getenv("HR_TARGET_DATE") or "").strip()
+        self.target_date = None
+        if target:
+            try:
+                y, m, d = map(int, re.split(r"[-/\.]", target))
+                self.target_date = date(y, m, d)
+            except:
+                print("⚠️ HR_TARGET_DATE 无法解析，忽略。")
+
         self.daily_title_pat = re.compile(r"三茅日[报報]")
         self.sources = [u.strip() for u in os.getenv("SRC_HRLOO_URLS", "https://www.hrloo.com/").split(",") if u.strip()]
 
@@ -103,7 +112,6 @@ class HRLooCrawler:
             if re.search(r"/news/\d+\.html$", href) and self.daily_title_pat.search(text):
                 links.append(urljoin(base, href))
 
-        # 兜底：如果首页没找到“日報”关键词，也先收集新闻详情链接，交给详情页判断
         if not links:
             links = [urljoin(base, a.get("href"))
                      for a in soup.select("a[href*='/news/']")
@@ -111,24 +119,36 @@ class HRLooCrawler:
 
         seen = set()
         for url in links:
-            if url in seen:
+            if url in seen: 
                 continue
             seen.add(url)
+
             pub_dt, titles, main = self._fetch_detail_clean(url)
-            if not main:
+            if not main or not self.daily_title_pat.search(main):
                 continue
-            if not self.daily_title_pat.search(main):
+            if not pub_dt:
                 continue
-            if self.only_today and not same_day(pub_dt):
-                continue
-            if not self.only_today and not within_24h(pub_dt):
-                continue
+
+            pub_d = pub_dt.date()
+            # —— 目标日期过滤 —— #
+            if self.target_date:
+                if pub_d != self.target_date:
+                    continue
+            elif self.only_today:
+                if pub_d != now_tz().date():
+                    continue
+            else:
+                # 放宽 36 小时窗口也许会混入前一天；此分支用于不限制日期时
+                if (now_tz() - pub_dt).total_seconds() > 36 * 3600:
+                    continue
+
             if not titles:
                 continue
+
             self.results.append({
                 "title": main,
                 "url": url,
-                "date": pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else "",
+                "date": pub_dt.strftime("%Y-%m-%d %H:%M"),
                 "titles": titles
             })
             print(f"[OK] {url} -> {len(titles)} 条")
@@ -171,25 +191,20 @@ class HRLooCrawler:
         cand_dt = [dt for dt in cand_dt if dt is not None]
 
         if not cand_dt:
-            all_dt = []
             for m in pat.finditer(soup.get_text(" ")):
                 try:
                     y, mo, d = int(m[1]), int(m[2]), int(m[3])
                     hh = int(m[4]) if m[4] else 9
                     mm = int(m[5]) if m[5] else 0
-                    all_dt.append(datetime(y, mo, d, hh, mm, tzinfo=_tz()))
+                    cand_dt.append(datetime(y, mo, d, hh, mm, tzinfo=_tz()))
                 except:
                     pass
-            cand_dt = all_dt
 
         if cand_dt:
             now = now_tz()
             past = [dt for dt in cand_dt if dt <= now]
-            if past:
-                return min(past, key=lambda dt: (now - dt))
-            return min(cand_dt, key=lambda dt: (dt - now))
+            return min(past or cand_dt, key=lambda dt: abs((now - dt).total_seconds()))
 
-        # 兜底：当天 09:00
         n = now_tz()
         return datetime(n.year, n.month, n.day, 9, 0, tzinfo=_tz())
 
@@ -216,35 +231,55 @@ class HRLooCrawler:
             print("[DetailError]", url, e)
             return None, [], ""
 
-    # —— 只保留真正新闻标题，剔除广告提示 —— #
+    # —— 只保留真正新闻标题，剔除广告提示与“阅读量” —— #
     def _extract_daily_item_titles(self, root):
         ad_words = [
-            "手机", "境外", "短信", "验证码", "审核", "粉丝", "入群", "账号", "APP", "登录",
-            "推广", "广告", "创建申请", "协议", "关注", "申诉", "下载", "网盘", "失信", "封号"
+            "手机","境外","短信","验证码","审核","粉丝","入群","账号","APP","登录",
+            "推广","广告","创建申请","协议","关注","申诉","下载","网盘","失信","封号"
         ]
+
+        # 去阅读量：若出现在句尾或“ · ”后
+        def strip_views(title: str) -> str:
+            t = title
+            # 统一一下分隔点
+            t = re.sub(r"[·•·‧∙⋅・●◦]\s*", " · ", t).strip()
+
+            # 去掉“ · 5k 阅读 / 1200 次阅读 / 1.2万阅读 / 阅读量：xxx”
+            t = re.sub(r"(?:^|[\s·|｜:-])\s*\d+(?:\.\d+)?\s*(?:k|K|万)?\s*(?:次)?阅读\s*$", "", t)
+            t = re.sub(r"(?:阅读量)\s*[:：]?\s*\d+(?:\.\d+)?\s*(?:k|K|万)?\s*$", "", t)
+            t = re.sub(r"\s*阅读\s*$", "", t)  # 兜底：尾部孤立的“阅读”
+            return t.strip(" 、，,.;。；|-—~… ")
+
         by_num = {}
-        for t in root.find_all(["h2", "h3", "h4", "strong", "b", "p", "li", "span", "div"]):
-            raw = (t.get_text() or "").strip()
+        for node in root.find_all(["h2","h3","h4","strong","b","p","li","span","div"]):
+            raw = (node.get_text() or "").strip()
             if not raw:
                 continue
+
             m = re.match(r"^\s*[（(]?\s*(\d{1,2})\s*[)）]?\s*[、.．]?\s*(.+)$", raw)
             if not m:
                 continue
+
             num, txt = int(m.group(1)), m.group(2).strip()
             if num >= 10 or txt.startswith("日，") or txt.startswith("日 "):
                 continue
             if any(w in txt for w in ad_words):
                 continue
+
+            # 去掉括号后的解释，只保留主标题
             title = re.split(r"[（\(]{1}", txt)[0].strip()
-            if not (4 <= len(title) <= 80):  # 放宽到 80
+            title = strip_views(title)  # ← 删除阅读量尾巴
+
+            if not (4 <= len(title) <= 80):
                 continue
+
             zh_ratio = len(re.findall(r"[\u4e00-\u9fa5]", title)) / max(len(title), 1)
             if zh_ratio < 0.3:
                 continue
+
             by_num.setdefault(num, title)
 
-        seq = []
-        n = 1
+        seq, n = [], 1
         while n in by_num:
             seq.append(by_num[n])
             n += 1
@@ -265,17 +300,18 @@ def build_md(items):
         out.append("> 未发现新的“三茅日报”。")
         return "\n".join(out)
 
-    date_yesterday = (now_tz() - timedelta(days=1)).strftime("%Y-%m-%d")  # 固定展示“昨天”
     for it in items:
         for j, t in enumerate(it["titles"], 1):
             out.append(f"{j}. {t}  ")
-        out.append(f"[查看详细]({it['url']}) （{date_yesterday}）  ")
+        # 使用真实发布时间的日期（YYYY-MM-DD）
+        real_date = (it.get("date") or "")[:10]
+        out.append(f"[查看详细]({it['url']}) （{real_date}）  ")
         out.append("")
     return "\n".join(out)
 
 # ========= 主入口 =========
 if __name__ == "__main__":
-    print("执行 hr_news_crawler_daily_clean_adfree.py（广告过滤·稳健版）")
+    print("执行 hr_news_crawler_daily_clean_adfree.py（目标日期 & 去阅读量版）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
