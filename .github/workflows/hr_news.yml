@@ -28,8 +28,8 @@ jobs:
       HR_REQUIRE_ALL: "0"
 
       # —— 钉钉（请确保 Secrets 名与这里一致）——
-      DINGTALK_BASE: ${{ secrets.DINGTALK_BAS }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRE }}
+      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       DINGTALK_KEYWORD: "早安资讯"
 
     steps:
