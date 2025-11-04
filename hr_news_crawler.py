@@ -75,6 +75,14 @@ def date_from_bracket_title(text:str):
 def looks_like_numbered(text: str) -> bool:
     return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
 
+# —— 统一去掉自带编号（“1、…/1. …/(1) …/① …/１． …”）
+CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+def strip_leading_num(t: str) -> str:
+    t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
+    t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
+    t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
+    return t.strip()
+
 class HRLooCrawler:
     def __init__(self):
         self.session = make_session()
@@ -127,7 +135,6 @@ class HRLooCrawler:
                 abs_url = urljoin(base, a["href"])
                 if self._try_detail(abs_url): return True
             print("[MISS] 容器通道未命中：", base)
-
         links = []
         for a in soup.select("a[href*='/news/']"):
             href = a.get("href","")
@@ -224,12 +231,12 @@ class HRLooCrawler:
             if len(text) < 4: continue
             text = re.split(r"[（(]?(阅读|阅读量|浏览|来源)[:：]\s*\d+.*$", text)[0].strip()
             if not text: continue
-            keep.append(text)
+            text = strip_leading_num(text)
+            if text: keep.append(text)
         seen, out = set(), []
         for t in keep:
             if t in seen: continue
-            seen.add(t)
-            out.append(t)
+            seen.add(t); out.append(t)
         return out
 
     def _extract_numbered_titles(self, root: Tag):
@@ -237,7 +244,7 @@ class HRLooCrawler:
         for p in root.find_all(["p","h2","h3","div","span","li"]):
             text = norm(p.get_text())
             if looks_like_numbered(text):
-                text = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", text)
+                text = strip_leading_num(text)
                 text = re.split(r"[（(]", text)[0].strip()
                 if text and len(text) >= 4:
                     out.append(text)
