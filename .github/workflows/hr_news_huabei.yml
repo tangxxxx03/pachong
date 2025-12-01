@@ -20,8 +20,6 @@ jobs:
       # —— 抓取入口（双源更稳：先命中先停）——
       SRC_HRLOO_URLS: "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
 
-      # ——（可选）指定历史日期：想抓当天就删掉这一行 —— 
-      # HR_TARGET_DATE: "2025-11-03"
 
       # —— 你之前保留的筛选参数（不影响本脚本）——
       HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
@@ -52,5 +50,5 @@ jobs:
 
       - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          echo "执行 hr_news_huabei.py（当天一条 · 三重日期校验版本）"
-          python hr_news_huabei.py
+          echo "执行 hr-news-huabei.py（当天一条 · 三重日期校验版本）"
+          python hr-news-huabei.py
