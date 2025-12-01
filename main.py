@@ -140,6 +140,31 @@ def extract_deadline(detail_text: str) -> str:
         if norm: return norm
     return ""
 
+# ========= 新增：从“项目概况”提炼摘要 =========
+def extract_project_brief(detail_text: str, max_len: int = 120) -> str:
+    """
+    优先从“项目概况”段落提炼摘要：
+    项目概况
+        ……（潜在投标人应在……获取招标文件，并于……前递交投标文件）
+    一、项目基本情况
+    """
+    txt = _safe_text(detail_text)
+
+    m = re.search(
+        r"项目概况\s*([\s\S]{0,600}?)(?=\n\s*[一二三四五六七八九]、|$)",
+        txt
+    )
+    if not m:
+        return ""
+
+    block = m.group(1)
+    block = re.sub(r"\s+", " ", block)
+    block = re.sub(r"^[：:、\-，。.\s]*", "", block).strip()
+    if not block:
+        return ""
+
+    return block[:max_len] + ("..." if len(block) > max_len else "")
+
 def fetch_pdf_text(url: str, referer: str = None, timeout=20) -> str:
     try:
         headers = {"User-Agent":"Mozilla/5.0"}
@@ -186,20 +211,67 @@ def extract_detail_text_with_pdf_fallback(driver, page_html: str, page_url: str)
     try: return driver.find_element(By.TAG_NAME, "body").text
     except Exception: return ""
 
+# ========= 替换：更精细的字段解析（金额 / 联系人 / 电话 / 摘要） =========
 def parse_bidding_fields(detail_text: str):
     txt = _safe_text(detail_text)
-    m_amt = re.search(r"(?:预算金额|最高限价|控制价|采购预算)\s*[:：]?\s*([0-9\.,，]+)\s*(万元|元)", txt)
-    amount = (m_amt.group(1).replace(",","").replace("，","") + m_amt.group(2)) if m_amt else "暂无"
-    m_lxr = re.search(r"(?:联系人|项目联系人|采购人联系人)\s*[:：]?\s*([^\s、，。;；]+)", txt)
-    contact = m_lxr.group(1).strip() if m_lxr else "暂无"
-    m_tel = re.search(r"(?:联系电话|联系方式|电话)\s*[:：]?\s*([0-9\-－—\s]{6,})", txt)
-    phone = re.sub(r"\s+","", m_tel.group(1)) if m_tel else "暂无"
-    plain = re.sub(r"\s+"," ", txt); brief = plain[:120] + ("..." if len(plain) > 120 else "")
-    if not brief.strip(): brief = "暂无"
+
+    # 金额：预算金额 / 最高限价 / 控制价 / 采购预算
+    m_amt = re.search(
+        r"(?:预算金额|最高限价|控制价|采购预算)\s*[:：]?\s*([0-9\.,，]+)\s*(万元|元)",
+        txt
+    )
+    if m_amt:
+        amount = m_amt.group(1).replace(",", "").replace("，", "") + m_amt.group(2)
+    else:
+        amount = "暂无"
+
+    # 联系人 & 电话：优先“项目联系人 + 电话”块
+    contact = "暂无"
+    phone   = "暂无"
+
+    m_cp = re.search(
+        r"项目联系人[：:\s]*([^\s、，。;；]+)[\s\S]{0,80}?"
+        r"(?:电\s*话|联系电话)[：:\s]*([0-9\-－—\s]{6,})",
+        txt,
+        re.S
+    )
+    if m_cp:
+        contact = m_cp.group(1).strip()
+        phone   = re.sub(r"\s+", "", m_cp.group(2))
+    else:
+        m_lxr = re.search(
+            r"(?:项目联系人|采购人联系人|联系人)\s*[:：]?\s*([^\s、，。;；]+)",
+            txt
+        )
+        if m_lxr:
+            contact = m_lxr.group(1).strip()
+
+        m_tel = re.search(
+            r"(?:联系电话|联系方式|电\s*话)\s*[:：]?\s*([0-9\-－—\s]{6,})",
+            txt
+        )
+        if m_tel:
+            phone = re.sub(r"\s+", "", m_tel.group(1))
+
+    # 摘要：优先“项目概况”
+    brief = extract_project_brief(txt)
+    if not brief:
+        plain = re.sub(r"\s+", " ", txt)
+        brief = plain[:120] + ("..." if len(plain) > 120 else "")
+    if not brief.strip():
+        brief = "暂无"
+
     industry = "暂无"
     deadline = extract_deadline(txt)
-    return {"金额": amount, "联系人": contact, "联系电话": phone, "简要摘要": brief,
-            "行业类型": industry, "投标截止": deadline or "暂无"}
+
+    return {
+        "金额": amount,
+        "联系人": contact,
+        "联系电话": phone,
+        "简要摘要": brief,
+        "行业类型": industry,
+        "投标截止": deadline or "暂无",
+    }
 
 def parse_award_from_tables(html: str):
     supplier = amount = score = content = "暂无"; unit = ""
@@ -377,6 +449,13 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
                             driver.switch_to.window(driver.window_handles[-1]); time.sleep(1.2)
                             detail_html = driver.page_source
                             detail_text = extract_detail_text_with_pdf_fallback(driver, detail_html, url_link) or content
+
+                            # 用详情页里的“发布来源”覆盖列表页的信息来源（若能识别到）
+                            if detail_text:
+                                m_src = re.search(r"发布来源[：:\s]*([^\n\r]+)", detail_text)
+                                if m_src:
+                                    info_source = m_src.group(1).strip() or info_source
+
                             driver.close(); driver.switch_to.window(win)
 
                         if ann_type == "招标公告":
