@@ -39,8 +39,8 @@ jobs:
           LIMIT: "60"
           DELAY: "0.8"
           # ✅ 使用固定钉钉 Webhook
-          DINGTALK_WEBHOOKA: "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
-          DINGTALK_SECRETA: ""
+          DINGTALK_WEBHOOKA: "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+          DINGTALK_SECRETA: "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
           NO_PUSH: "false"
         run: |
           # 清理代理变量防止推送失败
