@@ -287,7 +287,7 @@ def build_md(items):
 
 
 if __name__ == "__main__":
-    print("执行 hr_news_huabei.py（当天一条 · 三重日期校验 · strong 标题提取）")
+    print("执行 hr-news-huabei.py（当天一条 · 三重日期校验 · strong 标题提取）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
