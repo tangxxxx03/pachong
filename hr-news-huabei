@@ -17,6 +17,12 @@ def now_tz(): return datetime.now(_tz())
 def norm(s): return re.sub(r"\s+", " ", (s or "").strip())
 def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
 
+# ----------------------------------------
+# 固定钉钉 Webhook & Secret（你给我的版本）
+# ----------------------------------------
+DINGTALK_BASE = "https://oapi.dingtalk.com/robot/send?access_token=00c49f5d9aab4b8c86d60ef9bc0a25d46d9669b1b1d94645671062c4b845dced"
+DINGTALK_SECRET = "SEC2431e95f7bca3b419185a0fbd80530829c45c94977ba338022400433f064c6ad"
+
 def _sign_webhook(base, secret):
     if not base: return ""
     if not secret: return base
@@ -27,10 +33,10 @@ def _sign_webhook(base, secret):
     return f"{base}{sep}timestamp={ts}&sign={sign}"
 
 def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASE") or os.getenv("DINGTALK_BASEA")
-    secret = os.getenv("DINGTALK_SECRET") or os.getenv("DINGTALK_SECRETA")
+    base = DINGTALK_BASE
+    secret = DINGTALK_SECRET
     if not base:
-        print("🔕 未配置 DINGTALK_BASE，跳过推送。")
+        print("🔕 未配置 webhook，跳过推送。")
         return False
     try:
         r = requests.post(
@@ -43,7 +49,9 @@ def send_dingtalk_markdown(title, md):
         if not ok: print("resp:", r.text[:300])
         return ok
     except Exception as e:
-        print("DingTalk error:", e); return False
+        print("DingTalk error:", e)
+        return False
+
 
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
@@ -63,6 +71,7 @@ def make_session():
     s.mount("https://", LegacyTLSAdapter(max_retries=r))
     return s
 
+
 CN_TITLE_DATE = re.compile(r"[（(]\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*[)）]")
 def date_from_bracket_title(text:str):
     m = CN_TITLE_DATE.search(text or "")
@@ -75,13 +84,13 @@ def date_from_bracket_title(text:str):
 def looks_like_numbered(text: str) -> bool:
     return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
 
-# —— 统一去掉自带编号（“1、…/1. …/(1) …/① …/１． …”）
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 def strip_leading_num(t: str) -> str:
     t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
     t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
     t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
     return t.strip()
+
 
 class HRLooCrawler:
     def __init__(self):
@@ -135,6 +144,7 @@ class HRLooCrawler:
                 abs_url = urljoin(base, a["href"])
                 if self._try_detail(abs_url): return True
             print("[MISS] 容器通道未命中：", base)
+
         links = []
         for a in soup.select("a[href*='/news/']"):
             href = a.get("href","")
@@ -144,6 +154,7 @@ class HRLooCrawler:
             t2 = date_from_bracket_title(text)
             if t2 and t2 != self.target_date: continue
             links.append(urljoin(base, href))
+
         seen = set()
         for url in links:
             if url in seen: continue
@@ -177,6 +188,7 @@ class HRLooCrawler:
             for x in soup.select(sel):
                 if isinstance(x, Tag):
                     cand.append(x.get_text(" ", strip=True))
+
         pat = re.compile(r"(20\d{2})[./\-年](\d{1,2})[./\-月](\d{1,2})(?:\D+(\d{1,2}):(\d{1,2}))?")
         def parse_one(s):
             m = pat.search(s or "")
@@ -187,6 +199,7 @@ class HRLooCrawler:
                 mm = int(m[5]) if m[5] else 0
                 return datetime(y,mo,d,hh,mm,tzinfo=_tz())
             except: return None
+
         dts = [dt for dt in map(parse_one, cand) if dt]
         if dts:
             now = now_tz()
@@ -254,6 +267,7 @@ class HRLooCrawler:
             seen.add(t); final.append(t)
         return final
 
+
 def build_md(items):
     n = now_tz()
     out = [
@@ -271,8 +285,9 @@ def build_md(items):
     out.append(f"[查看详细]({it['url']})  ")
     return "\n".join(out)
 
+
 if __name__ == "__main__":
-    print("执行 hr_news_crawler.py（当天一条 · 三重日期校验 · strong 标题提取）")
+    print("执行 hr_news_huabei.py（当天一条 · 三重日期校验 · strong 标题提取）")
     c = HRLooCrawler()
     c.crawl()
     md = build_md(c.results)
