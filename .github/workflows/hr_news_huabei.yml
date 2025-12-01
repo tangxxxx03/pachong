@@ -27,10 +27,10 @@ jobs:
       HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
       HR_REQUIRE_ALL: "0"
 
-      # —— 钉钉（请确保 Secrets 名与这里一致）——
-      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
-      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
-      DINGTALK_KEYWORD: "早安资讯"
+      # —— 钉钉配置已改为脚本内置 webhook & secret，这里不再需要 Secrets —— 
+      # DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      # DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      # DINGTALK_KEYWORD: "每日资讯"
 
     steps:
       - name: Checkout code
@@ -46,11 +46,11 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
+          else:
             pip install requests beautifulsoup4 urllib3 tzdata
           fi
 
       - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          echo "执行 hr_news_huabei.py（当天一条 · 三重日期校验版本）"
-          python hr_news_huabei.py
+          echo "执行 hr-news-huabei.py（当天一条 · 三重日期校验版本）"
+          python hr-news-huabei.py
