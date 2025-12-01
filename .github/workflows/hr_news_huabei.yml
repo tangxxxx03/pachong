@@ -46,11 +46,11 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else:
+          else
             pip install requests beautifulsoup4 urllib3 tzdata
           fi
 
       - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          echo "执行 hr-news-huabei.py（当天一条 · 三重日期校验版本）"
-          python hr-news-huabei.py
+          echo "执行 hr_news_huabei.py（当天一条 · 三重日期校验版本）"
+          python hr_news_huabei.py
