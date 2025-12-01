@@ -20,8 +20,8 @@ def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六
 # ----------------------------------------
 # 固定钉钉 Webhook & Secret（你给我的版本）
 # ----------------------------------------
-DINGTALK_BASE = "https://oapi.dingtalk.com/robot/send?access_token=00c49f5d9aab4b8c86d60ef9bc0a25d46d9669b1b1d94645671062c4b845dced"
-DINGTALK_SECRET = "SEC2431e95f7bca3b419185a0fbd80530829c45c94977ba338022400433f064c6ad"
+DINGTALK_BASE = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+DINGTALK_SECRET = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"
 
 def _sign_webhook(base, secret):
     if not base: return ""
