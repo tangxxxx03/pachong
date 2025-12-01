@@ -1,0 +1,56 @@
+name: HR News（三茅人力资源网净化版）
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 每周一到周五，北京时间 09:00 运行（GitHub Actions 用 UTC）
+    - cron: "0 1 * * 1-5"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # —— 运行策略 —— 
+      HR_TZ: Asia/Shanghai
+      HR_ONLY_TODAY: "1"
+      HR_MAX_ITEMS: "1"   # 只取当天一条
+
+      # —— 抓取入口（双源更稳：先命中先停）——
+      SRC_HRLOO_URLS: "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
+
+      # ——（可选）指定历史日期：想抓当天就删掉这一行 —— 
+      # HR_TARGET_DATE: "2025-11-03"
+
+      # —— 你之前保留的筛选参数（不影响本脚本）——
+      HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
+      HR_REQUIRE_ALL: "0"
+
+      # —— 钉钉（请确保 Secrets 名与这里一致）——
+      DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+      DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+      DINGTALK_KEYWORD: "早安资讯"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests beautifulsoup4 urllib3 tzdata
+          fi
+
+      - name: Run HRLoo（三茅日报 · 当天一条）
+        run: |
+          echo "执行 hr_news_huabei.py（当天一条 · 三重日期校验版本）"
+          python hr_news_huabei.py
