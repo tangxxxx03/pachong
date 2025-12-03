@@ -30,4 +30,4 @@ jobs:
 
     - name: Run Fortune China crawler
       run: |
-        python scripts/fortune_shangye_crawler.py
+        python "python scripts/fortune_cn_crawler.py"
