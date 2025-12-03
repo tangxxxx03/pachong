@@ -1,0 +1,33 @@
+name: Fortune China 商业频道爬虫
+
+on:
+  schedule:
+    # 每天上午 09:00 北京时间运行一次（GitHub 用 UTC，需要 -8 小时）
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    env:
+      # 钉钉多群推送（建议在仓库 Secrets 里配置）
+      DINGTALK_BASES: ${{ secrets.DINGTALK_BASES }}
+      DINGTALK_SECRETS: ${{ secrets.DINGTALK_SECRETS }}
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 lxml
+
+    - name: Run Fortune China crawler
+      run: |
+        python scripts/fortune_shangye_crawler.py
