@@ -1,16 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 · 商业频道 爬虫示例
+财富中文网 · 商业频道 爬虫 + 钉钉推送
 https://www.fortunechina.com/shangye/
 
 功能：
 1. 抓取商业频道列表页（可多页）
 2. 提取：标题 / 链接 / 日期
-3. 可选：抓取每篇文章正文内容
+3. （可选）抓取每篇文章正文内容
+4. 把抓到的文章整理成 Markdown，推送到一个或多个钉钉群
+
+环境变量（建议通过 GitHub Secrets 配置）：
+  DINGTALK_BASES   = "url1,url2"          # 多个群的 webhook，用逗号隔开
+  DINGTALK_SECRETS = "sec1,sec2"         # 对应每个群的 secret（数量可以是 1 个或 N 个）
+  —— 或者只配单个：
+  DINGTALK_BASE    = "单个群 webhook"
+  DINGTALK_SECRET  = "单个群 secret"
 """
 
+import os
 import re
 import time
+import hmac
+import base64
+import hashlib
+import urllib.parse
+
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -28,6 +42,92 @@ session.headers.update({
     "Accept-Language": "zh-CN,zh;q=0.9",
 })
 
+
+# ================== 钉钉推送相关 ==================
+
+def _sign_webhook(base: str, secret: str) -> str:
+    """
+    给单个 webhook 加签，返回完整请求 URL
+    """
+    if not base:
+        return ""
+    if not secret:
+        return base
+
+    ts = str(round(time.time() * 1000))
+    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
+    sign = urllib.parse.quote_plus(
+        base64.b64encode(
+            hmac.new(secret.encode("utf-8"), string_to_sign, hashlib.sha256).digest()
+        )
+    )
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}timestamp={ts}&sign={sign}"
+
+
+def send_dingtalk_markdown(title: str, md: str) -> bool:
+    """
+    同一条 markdown 消息推送到多个钉钉群。
+
+    环境变量：
+      DINGTALK_BASES   = "url1,url2"
+      DINGTALK_SECRETS = "sec1,sec2"
+
+      或单个：
+      DINGTALK_BASE
+      DINGTALK_SECRET
+    """
+    bases_str = os.getenv("DINGTALK_BASES") or os.getenv("DINGTALK_BASE") or ""
+    secrets_str = os.getenv("DINGTALK_SECRETS") or os.getenv("DINGTALK_SECRET") or ""
+
+    bases = [b.strip() for b in bases_str.split(",") if b.strip()]
+    secrets = [s.strip() for s in secrets_str.split(",") if s.strip()]
+
+    if not bases:
+        print("🔕 未配置 DINGTALK_BASES/DINGTALK_BASE，跳过推送。")
+        return False
+
+    # 只配置了一个 secret，但有多个 webhook：复用这一个
+    if len(secrets) == 1 and len(bases) > 1:
+        secrets = secrets * len(bases)
+
+    # 长度不一致时，用空字符串补齐（表示不加签）
+    if secrets and len(secrets) != len(bases):
+        print("⚠️ DINGTALK_BASES 与 DINGTALK_SECRETS 数量不一致，缺失的将不加签。")
+        while len(secrets) < len(bases):
+            secrets.append("")
+
+    ok_any = False
+    for i, base in enumerate(bases):
+        secret = secrets[i] if i < len(secrets) else ""
+        full_url = _sign_webhook(base, secret)
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": title,
+                "text": md
+            }
+        }
+
+        try:
+            resp = requests.post(full_url, json=payload, timeout=20)
+            data = {}
+            try:
+                data = resp.json()
+            except Exception:
+                pass
+            ok = (resp.status_code == 200 and data.get("errcode") == 0)
+            print(f"[DingTalk #{i+1}] push={ok} code={resp.status_code}")
+            if not ok:
+                print("  resp:", resp.text[:300])
+            ok_any = ok_any or ok
+        except Exception as e:
+            print(f"[DingTalk #{i+1}] error:", e)
+
+    return ok_any
+
+
+# ================== 爬虫核心逻辑 ==================
 
 def fetch_list(page: int = 1):
     """
@@ -114,7 +214,7 @@ def fetch_detail(url: str) -> dict:
 
     # 页面中糊一遍找日期
     all_text = soup.get_text(" ", strip=True)
-    m = re.search(r"\d{4}-\d{2}-\d{2}", all_text)
+    m = re.search(r"\d{4}-\d{2}-\d2", all_text)
     pub_date = m.group(0) if m else ""
 
     return {
@@ -157,19 +257,49 @@ def crawl_pages(max_page: int = 1, with_detail: bool = False):
     return all_items
 
 
+# ================== Markdown 构造 ==================
+
+def build_markdown(articles, max_items: int = 10) -> str:
+    """
+    把文章列表转成适合钉钉的 Markdown 文本
+    """
+    out = []
+    out.append("**财富中文网 · 商业频道 · 每日精选**  ")
+    out.append("")
+    if not articles:
+        out.append("> 今日未抓到商业频道文章。")
+        return "\n".join(out)
+
+    for idx, art in enumerate(articles[:max_items], 1):
+        title = art.get("title", "")
+        date_str = art.get("date", "")
+        line = f"{idx}. **{title}**"
+        if date_str:
+            line += f"（{date_str}）"
+        out.append(line + "  ")
+        out.append(f"> {art.get('url', '')}  ")
+        out.append("")
+
+    return "\n".join(out)
+
+
+# ================== 主入口 ==================
+
 if __name__ == "__main__":
-    # 示例 1：只抓第一页列表，不抓正文
+    print("执行 fortune_cn_crawler.py（商业频道列表抓取 + 钉钉推送）")
+
+    # 抓取 1 页列表；想多一点可以改成 max_page=2/3...
     articles = crawl_pages(max_page=1, with_detail=False)
 
-    print("\n=== 列表结果预览（只显示前 5 条） ===")
+    print("\n=== 控制台预览（前 5 条） ===")
     for art in articles[:5]:
         print(f"{art['date']} | {art['title']}")
         print(f"  {art['url']}")
 
-    # 示例 2：如果你想连正文也抓，就把下面的注释去掉
-    # articles_with_content = crawl_pages(max_page=1, with_detail=True)
-    # print("\n=== 带正文内容的预览（前 1 条） ===")
-    # first = articles_with_content[0]
-    # print(first["date"], first["title"])
-    # print(first["url"])
-    # print(first["content"][:500], "......")
+    md = build_markdown(articles, max_items=10)
+
+    print("\n===== Markdown Preview =====\n")
+    print(md)
+
+    # 推送到钉钉（需要提前配置环境变量）
+    send_dingtalk_markdown("财富商业 · 每日精选", md)
