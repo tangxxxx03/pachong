@@ -12,8 +12,8 @@ jobs:
 
     env:
       # 钉钉多群推送（建议在仓库 Secrets 里配置）
-      DINGTALK_BASES: ${{ secrets.DINGTALK_BASES }}
-      DINGTALK_SECRETS: ${{ secrets.DINGTALK_SECRETS }}
+      DINGTALK_BASES: 
+      DINGTALK_SECRETS:
 
     steps:
     - name: Checkout repo
