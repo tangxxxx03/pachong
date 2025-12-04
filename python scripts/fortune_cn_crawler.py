@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫 v2
+财富中文网 商业频道爬虫（更鲁棒版本）
 抓取：标题、链接、日期
-—— 不再依赖 div.mod-list / li 结构，只要有 /shangye/c/ 链接就能抓。
 """
 
 import re
-from urllib.parse import urljoin
-
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 BASE = "https://www.fortunechina.com"
 
@@ -23,33 +21,42 @@ session.headers.update({
     "Accept-Language": "zh-CN,zh;q=0.9",
 })
 
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-def _extract_date_near(node) -> str:
-    """
-    在某个节点附近（它自己及后面的兄弟节点、再往上一层）里
-    尝试找到形如 2025-12-03 的日期字符串。
-    """
-    pattern = re.compile(r"(20\d{2}-\d{2}-\d{2})")
 
-    # 最多向上找 3 层，避免乱飘
-    cur = node
-    for _ in range(3):
-        if cur is None:
+def extract_date_near(anchor):
+    """
+    在文章链接附近（父节点、祖先节点、后面几个兄弟节点）找形如 2025-12-03 的日期。
+    找不到就返回空字符串。
+    """
+    # 1）先在父节点 / 祖先节点里找
+    parents = []
+    if anchor.parent:
+        parents.append(anchor.parent)
+        if anchor.parent.parent:
+            parents.append(anchor.parent.parent)
+            if anchor.parent.parent.parent:
+                parents.append(anchor.parent.parent.parent)
+
+    for node in parents:
+        text = node.get_text(" ", strip=True)
+        m = DATE_RE.search(text)
+        if m:
+            return m.group(0)
+
+    # 2）找不到的话，往后看几个兄弟节点
+    sib = anchor.parent
+    for _ in range(6):  # 最多看 6 个兄弟
+        if sib is None:
             break
-
-        # 看当前节点后面的兄弟
-        for sib in cur.next_siblings:
-            if hasattr(sib, "get_text"):
-                text = sib.get_text(" ", strip=True)
-            else:
-                text = str(sib).strip()
-
-            m = pattern.search(text)
+        sib = sib.next_sibling
+        if sib is None:
+            break
+        if hasattr(sib, "get_text"):
+            text = sib.get_text(" ", strip=True)
+            m = DATE_RE.search(text)
             if m:
-                return m.group(1)
-
-        # 往上一层再试
-        cur = cur.parent
+                return m.group(0)
 
     return ""
 
@@ -66,27 +73,25 @@ def fetch_list():
     soup = BeautifulSoup(r.text, "html.parser")
 
     items = []
-    seen = set()
 
-    # 关键逻辑：直接找所有 /shangye/c/ 开头的链接
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+    # 关键：直接遍历所有 <a>，只保留 /shangye/c/ 这种文章链接
+    anchors = soup.find_all("a", href=True)
+    print("页面总链接数：", len(anchors))
 
-        # 只要文章详情页
-        if not href.startswith("/shangye/c/"):
-            continue
+    article_anchors = []
+    for a in anchors:
+        href = a["href"]
+        if "/shangye/c/" in href and a.get_text(strip=True):
+            article_anchors.append(a)
 
+    print("候选文章链接数：", len(article_anchors))
+
+    for a in article_anchors:
         title = a.get_text(strip=True)
-        if not title:
-            continue
-
+        href = a["href"].strip()
         full_url = urljoin(BASE, href)
-        if full_url in seen:  # 去重（页面上有时上下都出现同一条）
-            continue
-        seen.add(full_url)
 
-        # 在当前链接附近找日期
-        pub_date = _extract_date_near(a)
+        pub_date = extract_date_near(a)
 
         items.append({
             "title": title,
