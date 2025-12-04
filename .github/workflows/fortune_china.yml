@@ -12,14 +12,14 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
-    # 这里把 GitHub Secrets 里的东西挂到环境变量里
+    # 这里把 GitHub Secrets 里的东西挂到环境变量里（脚本里直接用 os.getenv 就行）
     env:
       # Cloudflare AI Gateway
       CF_GATEWAY_URL: ${{ secrets.CF_GATEWAY_URL }}
       CF_AIG_TOKEN:   ${{ secrets.CF_AIG_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # 钉钉（如果脚本里用的是 DINGTALK_BASES / DINGTALK_SECRETS）
+      # 钉钉 Webhook & Secret（脚本里用 DINGTALK_BASES / DINGTALK_SECRETS）
       DINGTALK_BASES:   ${{ secrets.DINGTALK_BASES }}
       DINGTALK_SECRETS: ${{ secrets.DINGTALK_SECRETS }}
 
@@ -34,16 +34,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 如果你有 requirements.txt，就用这一行安装所有依赖
+          # 你仓库里已经有 requirements.txt，就用这一行安装所有依赖
           pip install -r requirements.txt
-          # 如果没有 requirements.txt，用下面这一行（或按需增删）
-          # pip install requests beautifulsoup4 lxml
 
       - name: Run Fortune China crawler
         run: |
+          # ⚠️ 目录名里有空格，一定要加引号！
           python "python scripts/fortune_cn_crawler.py"
 
-      # 如果你新建了 cf_ai_demo.py 想单独测 AI，也可以加一步：
+      # 如果后面你想单独测 Cloudflare AI，解开下面注释就行：
       # - name: Test Cloudflare AI demo
       #   run: |
       #     python "python scripts/cf_ai_demo.py"
