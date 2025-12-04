@@ -41,17 +41,22 @@ def fetch_list_page():
 
     results = []
 
-    # 右侧文章区：在 div.page-right 里，标题是 h2 > a
-    for h2 in soup.select("div.page-right h2"):
+    # 不限定容器，直接遍历全页所有 h2，
+    # 再用链接里是否包含 "/shangye/c/" 来判断是不是商业频道的文章
+    for h2 in soup.find_all("h2"):
         a = h2.find("a", href=True)
         if not a:
             continue
 
-        title = a.get_text(strip=True)
         href = a["href"]
+        # 只保留真正的商业频道文章链接
+        if "/shangye/c/" not in href:
+            continue
+
+        title = a.get_text(strip=True)
         full_url = urljoin(BASE, href)
 
-        # 尝试在同一块里找日期（div.date 或文本里的 yyyy-mm-dd）
+        # 在同一块文本中尝试抓日期（YYYY-MM-DD）
         parent_block = h2.parent
         text_block = parent_block.get_text(" ", strip=True)
         m = re.search(r"\d{4}-\d{2}-\d{2}", text_block)
@@ -77,21 +82,21 @@ def fetch_article_detail(url: str):
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # 外层容器：div.main-inner-page.article（你截图里看到的）
+    # 外层容器：你截图里看到的是 div.main-inner-page.article
     container = soup.select_one("div.main-inner-page.article") or soup
 
-    # 标题：h2 / h1
+    # 标题：h2 或 h1
     h = container.find(["h2", "h1"])
     title = h.get_text(strip=True) if h else ""
 
-    # 日期：一般在 div.date 里
+    # 日期：优先从 div.date 里找
     date_tag = container.find("div", class_="date")
     if date_tag:
         date_text = date_tag.get_text(strip=True)
         m = re.search(r"\d{4}-\d{2}-\d{2}", date_text)
         date_str = m.group(0) if m else date_text
     else:
-        # 兜底：从整页文本搜一个日期
+        # 兜底：从整块文本里搜一个 yyyy-mm-dd
         all_text = container.get_text(" ", strip=True)
         m = re.search(r"\d{4}-\d{2}-\d{2}", all_text)
         date_str = m.group(0) if m else ""
@@ -102,7 +107,7 @@ def fetch_article_detail(url: str):
         txt = p.get_text(strip=True)
         if not txt:
             continue
-        # 简单过滤图片说明等
+        # 过滤图片说明之类的内容（按需调整）
         if "图片来源" in txt:
             continue
         paras.append(txt)
@@ -117,10 +122,10 @@ def fetch_article_detail(url: str):
 
 
 def main():
-    # 1. 列表页
+    # 1. 先抓列表页
     articles = fetch_list_page()
 
-    # 只抓前 3 篇避免太多请求
+    # 只抓前 3 篇，避免请求太多
     for idx, info in enumerate(articles[:3], 1):
         print("\n" + "=" * 60)
         print(f"[第 {idx} 篇] 列表信息：")
@@ -128,7 +133,7 @@ def main():
         print("链接：", info["url"])
         print("日期（列表页）：", info["date"])
 
-        # 2. 详情页
+        # 2. 再抓详情页
         detail = fetch_article_detail(info["url"])
         print("\n详情页标题：", detail["title"])
         print("详情页日期：", detail["date"])
