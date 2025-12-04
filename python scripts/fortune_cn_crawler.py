@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（可抓到标题、链接、日期）
+财富中文网 商业频道爬虫（抓标题 + 链接 + 日期）
 """
 
 import re
@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 
 BASE = "https://www.fortunechina.com"
 
+# 建一个带 UA 的 session
 session = requests.Session()
 session.headers.update({
     "User-Agent": (
@@ -23,8 +24,16 @@ session.headers.update({
 
 
 def fetch_list():
-    """抓商业频道首页的文章列表"""
+    """
+    抓商业频道首页的文章列表
 
+    返回：list[dict]，每个元素：
+    {
+        "title": 标题,
+        "url":   详情链接,
+        "date":  日期字符串（可能为空）
+    }
+    """
     url = f"{BASE}/shangye/"
     print("请求列表页：", url)
 
@@ -35,30 +44,26 @@ def fetch_list():
 
     items = []
 
-    # ============================
-    # 关键：适配你的截图结构
-    # ============================
-    # 查找所有文章块（列表页文章在 <section> 里）
-    for block in soup.find_all("section"):
-        # 找标题
-        h2 = block.find("h2")
-        if not h2:
-            continue
-
+    # 关键：直接找右侧列表区域里的所有 h2
+    # （结构大概是 <div class="page-right"> ... <h2><a href="...">标题</a></h2> ...）
+    for h2 in soup.select("div.page-right h2"):
         a = h2.find("a", href=True)
         if not a:
             continue
 
         href = a["href"]
+
+        # 只要真正的商业频道文章链接
         if "/shangye/c/" not in href:
             continue
 
         title = a.get_text(strip=True)
         full_url = urljoin(BASE, href)
 
-        # 在同一块中找日期
-        date_div = block.find("div", class_=re.compile("date|time", re.I))
-        pub_date = date_div.get_text(strip=True) if date_div else ""
+        # 在同一块附近找日期（div.date 或包含日期的文本）
+        block_text = " ".join(h2.parent.get_text(" ", strip=True).split())
+        m = re.search(r"\d{4}-\d{2}-\d{2}", block_text)
+        pub_date = m.group(0) if m else ""
 
         items.append({
             "title": title,
