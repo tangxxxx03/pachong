@@ -1,27 +1,49 @@
 name: Fortune China 商业频道爬虫 Demo
 
 on:
-  workflow_dispatch: {}        # 手动运行
+  # 手动运行
+  workflow_dispatch: {}
+
+  # 每天 09:00 北京时间运行（GitHub Actions 用的是 UTC，所以这里是 1 点）
   schedule:
-    - cron: "0 1 * * *"       # 每天 09:00 北京时间（UTC+8 -> 1 点）
+    - cron: "0 1 * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # 这里把 GitHub Secrets 里的东西挂到环境变量里
+    env:
+      # Cloudflare AI Gateway
+      CF_GATEWAY_URL: ${{ secrets.CF_GATEWAY_URL }}
+      CF_AIG_TOKEN:   ${{ secrets.CF_AIG_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # 钉钉（如果脚本里用的是 DINGTALK_BASES / DINGTALK_SECRETS）
+      DINGTALK_BASES:   ${{ secrets.DINGTALK_BASES }}
+      DINGTALK_SECRETS: ${{ secrets.DINGTALK_SECRETS }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 lxml
+          # 如果你有 requirements.txt，就用这一行安装所有依赖
+          pip install -r requirements.txt
+          # 如果没有 requirements.txt，用下面这一行（或按需增删）
+          # pip install requests beautifulsoup4 lxml
 
       - name: Run Fortune China crawler
         run: |
           python "python scripts/fortune_cn_crawler.py"
+
+      # 如果你新建了 cf_ai_demo.py 想单独测 AI，也可以加一步：
+      # - name: Test Cloudflare AI demo
+      #   run: |
+      #     python "python scripts/cf_ai_demo.py"
