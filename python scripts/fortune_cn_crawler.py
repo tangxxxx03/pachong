@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（粗暴版）
-1）先把首页 HTML 整体拉下来
-2）用正则从 HTML 里直接找 “content_xxx.htm” 这种链接
-3）逐篇请求正文，抓一小段文字当示例
-
-注意：这里只是 Demo，用来验证“能不能抓到东西”，
-不是最终生产级代码。
+财富中文网 商业频道爬虫（重新设计版）
+- 列表页：从 https://www.fortunechina.com/shangye/ 抓取文章链接
+- 规则：只要 <a> 的 href 里包含 "content_数字" 且以 .htm/.html/.shtml 结尾
+- 正文页：尽量从常见的正文容器里抽取所有 <p> 文本
 """
 
 import re
@@ -28,108 +25,148 @@ session.headers.update({
 })
 
 
-def fetch_list():
-    """从商业频道首页，粗暴用正则提取文章链接"""
+# ========= 基础工具 =========
 
+def fetch_html(url: str, desc: str = "") -> str:
+    """通用请求函数，带重试和调试输出"""
+    for i in range(3):
+        try:
+            print(f"[请求] {desc} ({i+1}/3)：{url}")
+            r = session.get(url, timeout=20)
+            r.raise_for_status()
+            # 有些页面 charset 可能没写死，让 requests 自己猜
+            r.encoding = r.apparent_encoding
+            return r.text
+        except Exception as e:
+            print(f"  第 {i+1} 次尝试失败：{e}")
+            time.sleep(2)
+
+    print(f"❌ 连续 3 次请求失败：{url}")
+    return ""
+
+
+# ========= 1. 列表页：抽取文章链接 =========
+
+def extract_list() -> list:
     url = f"{BASE}/shangye/"
-    print("请求列表页：", url)
+    html = fetch_html(url, "商业频道列表页")
+    if not html:
+        print("❌ 列表页请求失败，直接返回空列表")
+        return []
 
-    r = session.get(url, timeout=20)
-    r.raise_for_status()
-
-    html = r.text
     print("列表页 HTML 长度：", len(html))
-
-    # 打印前 500 字，方便你在 Actions 日志里肉眼确认结构
     print("=== 列表页 HTML 前 500 字 ===")
-    print(html[:500].replace("\n", " ")[:500])
+    print(html[:500])
     print("=== END ===")
 
-    # 关键：直接在 HTML 里找 “/2025-12/29/content_xxx.htm” 这类链接
-    # 年份 20xx，后面 “-MM/DD/content_任意字符.htm”
-    pattern = re.compile(
-        r'href="(?P<href>/(?:shangye/)?20\d{2}-\d{2}/\d{2}/content_[^"]+?\.htm)"',
-        re.IGNORECASE,
-    )
-    links = set()
+    soup = BeautifulSoup(html, "html.parser")
 
-    for m in pattern.finditer(html):
-        href = m.group("href")
-        full = urljoin(BASE, href)
-        links.add(full)
+    items = []
+    seen = set()
 
-    links = sorted(links)
-    print("匹配到文章链接数：", len(links))
-    for i, link in enumerate(links[:20], 1):
-        print(f"  [{i:02d}] {link}")
+    # 关键：不要死盯某个 div 结构，直接扫描所有 <a>
+    pattern = re.compile(r"content_\d+", re.I)
 
-    return links
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        # 只抓带 content_数字 的链接
+        if not pattern.search(href):
+            continue
+        # 只要是 htm/html/shtml 结尾就收
+        if not href.lower().endswith((".htm", ".html", ".shtml")):
+            continue
+
+        full_url = urljoin(BASE, href)
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+
+        title = a.get_text(strip=True) or "(无标题)"
+        items.append({
+            "title": title,
+            "url": full_url,
+        })
+
+    print("=== 列表链接统计 ===")
+    print("识别到文章链接数：", len(items))
+    return items
 
 
-def fetch_article(url: str) -> str:
-    """抓取单篇文章正文，返回一段前缀文本（最多 400 字左右）"""
+# ========= 2. 正文页：抽取正文文本 =========
 
-    print("  -> 抓取正文：", url)
-    try:
-        r = session.get(url, timeout=20)
-        r.raise_for_status()
-    except Exception as e:
-        print("  !! 正文请求失败：", e)
+def extract_article_text(url: str) -> str:
+    html = fetch_html(url, "文章正文页")
+    if not html:
         return ""
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
 
-    # 尝试几种常见正文容器
+    # 尝试多种常见正文容器
     candidates = [
-        # PC 端常见
         "div.article-content",
-        "div.content",
+        "div.article-text",
         "div#content",
-        "div.conBox",
-        # 移动端 m.fortunechina.com 之类
-        "div.article",
-        "div.main",
+        "div.conTxt",
+        "div.art_p",
+        "div.main-article",
     ]
 
-    text = ""
+    container = None
     for css in candidates:
-        node = soup.select_one(css)
-        if node:
-            text = node.get_text(separator="\n", strip=True)
-            if text:
-                print("  使用正文选择器：", css)
-                break
+        container = soup.select_one(css)
+        if container:
+            print(f"  使用正文选择器：{css}")
+            break
 
-    # 如果上面几个都没抓到，就退一步：整页取文本（不推荐，但至少能看到点东西）
-    if not text:
-        text = soup.get_text(separator="\n", strip=True)
-        print("  ⚠️ 未找到明显正文容器，退回整页文本")
+    # 如果上述都没找到，就退化成整个 <body>
+    if not container:
+        container = soup.body
+        print("  未找到特定正文容器，退化为 body 里的所有 <p>")
 
-    # 只返回前 400 字，避免日志太长
-    text = text.replace("\r", "")
-    return text[:400]
+    if not container:
+        print("  页面没有 body，放弃该篇")
+        return ""
 
+    paragraphs = []
+    for p in container.find_all("p"):
+        text = p.get_text(" ", strip=True)
+        # 过滤掉特别短/明显是导航的东西
+        if len(text) < 8:
+            continue
+        paragraphs.append(text)
+
+    content = "\n".join(paragraphs).strip()
+    return content
+
+
+# ========= 3. 主流程：先抓列表，再试着抓几篇正文 =========
 
 def main():
-    links = fetch_list()
+    items = extract_list()
 
-    print("\n=== 抓取前 5 篇正文示例 ===")
-    count_ok = 0
-    for idx, url in enumerate(links[:5], 1):
-        print(f"\n--- 第 {idx} 篇 ---")
-        snippet = fetch_article(url)
-        if snippet:
-            count_ok += 1
-            print(snippet)
-        else:
-            print("（正文抓取失败）")
+    print("\n=== 抓取前 5 条列表预览 ===")
+    for it in items[:5]:
+        print(f"- {it['title']} | {it['url']}")
 
-        # 避免对目标站压力过大，稍微 sleep 一下
-        time.sleep(1)
+    print("\n=== 抓取正文示例（最多前 5 篇） ===")
+    success = 0
+    for it in items[:5]:
+        print("\n--- 正在抓正文：", it["title"])
+        print("URL:", it["url"])
+        text = extract_article_text(it["url"])
+        if not text:
+            print("  ❌ 正文为空或抓取失败")
+            continue
 
-    print("\n=== 统计 ===")
-    print("列表页链接总数：", len(links))
-    print("成功抓到正文的篇数：", count_ok)
+        success += 1
+        print("  ✅ 正文长度：", len(text))
+        print("  === 正文前 300 字预览 ===")
+        print(text[:300].replace("\n", " "))
+        print("  === 预览结束 ===")
+
+    print("\n=== 总结 ===")
+    print("列表识别链接数：", len(items))
+    print("成功抓到正文篇数：", success)
 
 
 if __name__ == "__main__":
