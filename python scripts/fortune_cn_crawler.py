@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（更鲁棒版本）
-抓取：标题、链接、日期
+财富中文网 商业频道爬虫（列表 + 正文）
+抓取：
+- 列表页：标题、链接、日期
+- 详情页：正文内容（按段落拼成一个字符串）
 """
 
 import re
+import time
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from urllib.parse import urljoin
 
 BASE = "https://www.fortunechina.com"
@@ -21,45 +24,13 @@ session.headers.update({
     "Accept-Language": "zh-CN,zh;q=0.9",
 })
 
+# 匹配 2025-12-03 这种日期
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def extract_date_near(anchor):
-    """
-    在文章链接附近（父节点、祖先节点、后面几个兄弟节点）找形如 2025-12-03 的日期。
-    找不到就返回空字符串。
-    """
-    # 1）先在父节点 / 祖先节点里找
-    parents = []
-    if anchor.parent:
-        parents.append(anchor.parent)
-        if anchor.parent.parent:
-            parents.append(anchor.parent.parent)
-            if anchor.parent.parent.parent:
-                parents.append(anchor.parent.parent.parent)
-
-    for node in parents:
-        text = node.get_text(" ", strip=True)
-        m = DATE_RE.search(text)
-        if m:
-            return m.group(0)
-
-    # 2）找不到的话，往后看几个兄弟节点
-    sib = anchor.parent
-    for _ in range(6):  # 最多看 6 个兄弟
-        if sib is None:
-            break
-        sib = sib.next_sibling
-        if sib is None:
-            break
-        if hasattr(sib, "get_text"):
-            text = sib.get_text(" ", strip=True)
-            m = DATE_RE.search(text)
-            if m:
-                return m.group(0)
-
-    return ""
-
+# =====================================================
+# 1. 列表页：抓标题 + 链接 + 日期
+# =====================================================
 
 def fetch_list():
     """抓商业频道首页的文章列表"""
@@ -74,24 +45,47 @@ def fetch_list():
 
     items = []
 
-    # 关键：直接遍历所有 <a>，只保留 /shangye/c/ 这种文章链接
-    anchors = soup.find_all("a", href=True)
-    print("页面总链接数：", len(anchors))
+    # 核心：找所有 h2 下面的 <a>，每一个当成一篇文章
+    h2_tags = soup.find_all("h2")
+    print("页面 h2 数量：", len(h2_tags))
 
-    article_anchors = []
-    for a in anchors:
-        href = a["href"]
-        if "/shangye/c/" in href and a.get_text(strip=True):
-            article_anchors.append(a)
+    for h2 in h2_tags:
+        a = h2.find("a", href=True)
+        if not a:
+            continue
 
-    print("候选文章链接数：", len(article_anchors))
-
-    for a in article_anchors:
         title = a.get_text(strip=True)
         href = a["href"].strip()
+
+        # 排除太短的标题（一般是导航之类）
+        if not title or len(title) < 4:
+            continue
+
         full_url = urljoin(BASE, href)
 
-        pub_date = extract_date_near(a)
+        # 在 h2 后面邻近的兄弟节点里找日期
+        pub_date = ""
+        node = h2
+        for _ in range(6):   # 最多往后看 6 个兄弟节点
+            node = node.next_sibling
+            if node is None:
+                break
+
+            if isinstance(node, NavigableString):
+                text = str(node)
+            else:
+                try:
+                    text = node.get_text(" ", strip=True)
+                except Exception:
+                    continue
+
+            if not text:
+                continue
+
+            m = DATE_RE.search(text)
+            if m:
+                pub_date = m.group(0)
+                break
 
         items.append({
             "title": title,
@@ -99,13 +93,70 @@ def fetch_list():
             "date": pub_date,
         })
 
-    print("成功抓到：", len(items), "篇文章")
+    print("成功抓到列表：", len(items), "篇文章")
     return items
 
+
+# =====================================================
+# 2. 详情页：根据链接抓正文
+# =====================================================
+
+def fetch_article_content(url: str) -> str:
+    """
+    请求文章详情页，提取正文内容（按段落拼接）。
+    """
+    print("  请求正文：", url)
+    r = session.get(url, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    # 先尝试找主内容区域：main-inner-page article 之类的 div
+    main = soup.find("div", class_=re.compile(r"main-inner-page|inner-page\s+article", re.I))
+    if not main:
+        # 没找到就退一步，用 <main>，再不行就整个页面兜底
+        main = soup.find("main") or soup
+
+    paragraphs = []
+    for p in main.find_all("p"):
+        text = p.get_text(" ", strip=True)
+        if not text:
+            continue
+
+        # 过滤掉明显不是正文的东西（你后面可以按需要慢慢加）
+        if "分享到" in text:
+            continue
+        if "Plus" in text and "会员" in text:
+            continue
+
+        paragraphs.append(text)
+
+    content = "\n".join(paragraphs)
+    return content
+
+
+# =====================================================
+# 3. main：先抓列表，再逐篇抓正文
+# =====================================================
 
 if __name__ == "__main__":
     items = fetch_list()
 
-    print("\n=== 前 5 条 ===")
+    # 逐篇请求正文，这里全部抓；如果怕时间太长，可以改成 items[:5]
+    for idx, it in enumerate(items, start=1):
+        try:
+            content = fetch_article_content(it["url"])
+        except Exception as e:
+            print(f"  ⚠️ 抓正文失败 [{idx}] {it['title']} -> {e}")
+            it["content"] = ""
+            continue
+
+        it["content"] = content
+        # 礼貌一点，别太快
+        time.sleep(1)
+
+    print("\n=== 前 5 条预览（只显示正文前 80 字）===\n")
     for it in items[:5]:
-        print(f"{it['date']} | {it['title']} | {it['url']}")
+        preview = (it.get("content") or "").replace("\n", " ")[:80]
+        print(f"{it['date']} | {it['title']}")
+        print("  正文预览：", preview)
+        print("-" * 60)
