@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- SiliconFlow AI 摘要 & Markdown 版
+财富中文网 商业频道爬虫（PC 版结构）- SiliconFlow AI 摘要 & Markdown 版（带详细报错）
 
 功能：
 1. 抓取财富中文网·商业频道指定日期的新闻（默认抓“北京时间昨天”的）。
@@ -11,8 +11,8 @@
 
 环境变量（建议用 GitHub Secrets 配置）：
 - OPENAI_API_KEY : 你的 SiliconFlow API Key（sk-开头的那串）。
-- AI_API_BASE    : 可选，SiliconFlow 基础地址，默认 https://api.siliconflow.cn/v1
-- AI_MODEL       : 可选，使用的模型名，默认 deepseek-ai/DeepSeek-V2-Chat
+- AI_API_BASE    : 可选，基础地址，推荐填 https://api.siliconflow.cn/v1
+- AI_MODEL       : 可选，使用的模型名，默认 Qwen/Qwen2.5-7B-Instruct
 - TARGET_DATE    : 可选，指定抓取哪一天（YYYY-MM-DD），不设则默认“北京时间昨天”。
 """
 
@@ -60,14 +60,14 @@ TARGET_DATE = get_target_date()
 # 从环境变量读取 Key（GitHub Secrets: OPENAI_API_KEY）
 AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# SiliconFlow 基础地址，默认 https://api.siliconflow.cn/v1
+# 商家说明：基础地址 https://api.siliconflow.cn/v1
 AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
 
-# ChatCompletions URL
+# ChatCompletions URL => https://api.siliconflow.cn/v1/chat/completions
 AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
 
-# 模型名称（可以在 SiliconFlow 控制台看支持的模型）
-AI_MODEL = os.getenv("AI_MODEL", "deepseek-ai/DeepSeek-V2-Chat")
+# 模型名称：如果你在商家后台看到别的，就把那一串填到 Secrets 的 AI_MODEL 中
+AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -97,6 +97,10 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         print("  ⚠️ 未配置 OPENAI_API_KEY（SiliconFlow API Key），跳过 AI 摘要。")
         return fallback_title or "（未配置 AI 摘要）"
 
+    if not AI_MODEL:
+        print("  ⚠️ 未配置 AI_MODEL（模型名），跳过 AI 摘要。")
+        return fallback_title or "（未配置模型名）"
+
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {AI_API_KEY}",
@@ -122,14 +126,21 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         "temperature": 0.3,
     }
 
-    print(f"  🤖 正在调用 AI（{AI_CHAT_URL}）生成摘要...")
+    print(f"  🤖 正在调用 AI（{AI_CHAT_URL}，模型={AI_MODEL}）生成摘要...")
 
     try:
         resp = requests.post(AI_CHAT_URL, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
 
-        # 兼容 OpenAI 风格响应
+        # 这里先不 raise，先把错误信息打出来
+        if resp.status_code != 200:
+            print(f"  ❌ AI 返回非 200 状态码：{resp.status_code}")
+            try:
+                print("  ❌ AI 返回内容：", resp.text)
+            except Exception:
+                pass
+            resp.raise_for_status()
+
+        data = resp.json()
         summary = data["choices"][0]["message"]["content"].strip()
         summary = summary.splitlines()[0].strip()  # 只取第一行
         print(f"  ✨ AI 摘要：{summary}")
@@ -166,7 +177,6 @@ def fetch_list(page: int = 1):
     soup = BeautifulSoup(r.text, "html.parser")
     items = []
 
-    # 这里使用你之前验证过能用的选择器
     for li in soup.select("ul.news-list li.news-item"):
         h2 = li.find("h2")
         a = li.find("a", href=True)
@@ -175,7 +185,6 @@ def fetch_list(page: int = 1):
         if not (h2 and a and date_div):
             continue
 
-        # 获取原始 href (例如: "c/2025-12/07/content_470761.htm")
         href = a["href"].strip()
         pub_date = date_div.get_text(strip=True) if date_div else ""
 
@@ -213,7 +222,6 @@ def fetch_article_content(item: dict):
     """
     url = item["url"]
     headers = DEFAULT_HEADERS.copy()
-    # 加上 Referer，模拟从列表页点过去
     headers["Referer"] = LIST_URL_BASE
 
     for attempt in range(MAX_RETRY):
@@ -222,10 +230,9 @@ def fetch_article_content(item: dict):
             r.raise_for_status()
 
             soup = BeautifulSoup(r.text, "html.parser")
-            # 尝试多种正文选择器，以防页面结构微调
             container = soup.select_one("div.article-mod div.word-text-con")
             if not container:
-                container = soup.select_one("div.article-content")  # 备用选择器
+                container = soup.select_one("div.article-content")
 
             if not container:
                 item["content"] = "[正文容器未找到]"
@@ -274,11 +281,6 @@ def save_to_csv(data: list, filename: str):
 
 
 def build_markdown(items: list) -> str:
-    """
-    生成一个 Markdown 字符串：
-    - 顶部是标题
-    - 每一行都是：1. [AI 摘要](URL)
-    """
     if not items:
         return f"### 财富中文网·商业频道精选（{TARGET_DATE}）\n\n今日未抓到符合条件的新闻。"
 
