@@ -19,9 +19,9 @@ jobs:
       CF_AIG_TOKEN:   ${{ secrets.CF_AIG_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-      # 钉钉 Webhook & Secret（脚本里用 DINGTALK_BASES / DINGTALK_SECRETS）
-      DINGTALK_BASES:   ${{ secrets.DINGTALK_BASES }}
-      DINGTALK_SECRETS: ${{ secrets.DINGTALK_SECRETS }}
+      # 钉钉 Webhook & Secret
+      DINGTALK_BASES:   ${{ secrets.dingdingshangyewebhook }}
+      DINGTALK_SECRETS: ${{ secrets.dingdingshangyesecret }}
 
     steps:
       - name: Checkout repo
