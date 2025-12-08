@@ -1,0 +1,44 @@
+name: Daily HR + Business News Push
+
+on:
+  workflow_dispatch: {}
+
+  # 每天上午 09:30（北京时间）自动运行
+  schedule:
+    - cron: "30 1 * * *"   # GitHub 用 UTC，所以 09:30 = 01:30 UTC
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # —— 运行日期策略（可选）——
+      HR_TARGET_DATE: ""
+      TARGET_DATE: ""
+
+      # —— AI 配置 ——  
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AI_API_BASE: "https://api.siliconflow.cn/v1"
+      AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
+
+      # —— 单机器人（你指定的 shangye 机器人）——
+      DINGTALK_BASE: ${{ secrets.dingdingshangyewebhook }}
+      DINGTALK_SECRET: ${{ secrets.dingdingshangyesecret }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Run Combined Crawler (HR + FortuneChina)
+        run: |
+          python hr_fortune_combo.py
