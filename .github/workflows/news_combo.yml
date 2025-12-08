@@ -23,8 +23,8 @@ jobs:
       AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
 
       # —— 单机器人（你指定的 shangye 机器人）——
-      DINGTALK_BASE: ${{ secrets.dingdingshangyewebhook }}
-      DINGTALK_SECRET: ${{ secrets.dingdingshangyesecret }}
+      DINGTALK_BASE: ${{ secrets.DINGDINGSHANGYEWEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGDINGSHANGTESECRET }}
 
     steps:
       - name: Checkout Repo
