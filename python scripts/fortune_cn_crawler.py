@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- V8 + 第三方 AI 摘要 & Markdown 版
+财富中文网 商业频道爬虫（PC 版结构）- SiliconFlow AI 摘要 & Markdown 版
 
-在你原有 V8（路径拼接终极修正版）基础上增加：
-1. 日期改为：默认抓“北京时间的昨天”；也可用环境变量 TARGET_DATE 覆盖（格式 2025-12-07）。
-2. 使用第三方中转接口 http://twob.pp.ua/v1/chat/completions 生成一句话中文摘要。
-3. 输出 CSV：增加 ai_summary 字段。
-4. 生成 Markdown：每条为 [AI 摘要](URL)，可直接用于钉钉 Markdown 消息。
+功能：
+1. 抓取财富中文网·商业频道指定日期的新闻（默认抓“北京时间昨天”的）。
+2. 修复列表页 href 相对路径（c/2025-12/07/...）丢失 /shangye/ 的问题。
+3. 调用 SiliconFlow OpenAI 兼容接口生成「一句话中文摘要」。
+4. 导出 CSV（包含原始标题 + AI 摘要 + 日期 + URL + 正文）。
+5. 生成 Markdown 列表（每条 [AI 摘要](URL)），适合钉钉 Markdown 群发。
 
-环境变量（推荐用 GitHub Secrets 配置）：
-- OPENAI_API_KEY : 你的第三方令牌（就是你买的 sk-xxxx）
-- AI_API_BASE    : 可选，默认 http://twob.pp.ua/v1
+环境变量（建议用 GitHub Secrets 配置）：
+- OPENAI_API_KEY : 你的 SiliconFlow API Key（sk-开头的那串）。
+- AI_API_BASE    : 可选，SiliconFlow 基础地址，默认 https://api.siliconflow.cn/v1
+- AI_MODEL       : 可选，使用的模型名，默认 deepseek-ai/DeepSeek-V2-Chat
 - TARGET_DATE    : 可选，指定抓取哪一天（YYYY-MM-DD），不设则默认“北京时间昨天”。
 """
 
@@ -18,14 +20,14 @@ import os
 import re
 import time
 import csv
-import json
 from datetime import datetime, timedelta, timezone
 
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-# --- 基本配置 ---
+# ================== 基本配置 ==================
+
 BASE = "https://www.fortunechina.com"
 # 列表页 URL，务必以 / 结尾，方便 urljoin
 LIST_URL_BASE = "https://www.fortunechina.com/shangye/"
@@ -40,7 +42,7 @@ def get_target_date() -> str:
     """
     决定要抓取的目标日期：
     1. 如果设置了环境变量 TARGET_DATE（例如 "2025-12-07"），优先用它；
-    2. 否则默认抓「北京时间的昨天」，格式 YYYY-MM-DD。
+    2. 否则默认抓「北京时间昨天」，格式 YYYY-MM-DD。
     """
     env_date = os.getenv("TARGET_DATE", "").strip()
     if env_date:
@@ -53,12 +55,19 @@ def get_target_date() -> str:
 
 TARGET_DATE = get_target_date()
 
-# --- 第三方 AI 配置（twob.pp.ua） ---
-AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-AI_API_BASE = os.getenv("AI_API_BASE", "http://twob.pp.ua/v1").rstrip("/")
-AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
-AI_MODEL = "[次]gemini-2.5-pro"  # 按你平台提供的默认模型名
+# ================== SiliconFlow AI 配置 ==================
 
+# 从环境变量读取 Key（GitHub Secrets: OPENAI_API_KEY）
+AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+# SiliconFlow 基础地址，默认 https://api.siliconflow.cn/v1
+AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
+
+# ChatCompletions URL
+AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
+
+# 模型名称（可以在 SiliconFlow 控制台看支持的模型）
+AI_MODEL = os.getenv("AI_MODEL", "deepseek-ai/DeepSeek-V2-Chat")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -72,11 +81,12 @@ DEFAULT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-
 # ================== AI 摘要函数 ==================
+
+
 def get_ai_summary(content: str, fallback_title: str = "") -> str:
     """
-    使用第三方 twob.pp.ua 平台生成一句话摘要。
+    使用 SiliconFlow OpenAI 兼容接口生成一句话摘要。
     - content: 文章正文
     - fallback_title: 若 AI 调用失败则退回的标题（可以传原始标题）
     """
@@ -84,7 +94,7 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         return fallback_title or "内容过短，无需摘要"
 
     if not AI_API_KEY:
-        print("  ⚠️ 未配置 OPENAI_API_KEY（第三方令牌），跳过 AI 摘要。")
+        print("  ⚠️ 未配置 OPENAI_API_KEY（SiliconFlow API Key），跳过 AI 摘要。")
         return fallback_title or "（未配置 AI 摘要）"
 
     headers = {
@@ -98,8 +108,10 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "你是一个严谨的中文新闻编辑，请将新闻正文提炼成一句中文摘要，"
-                           "要求：客观、不夸张、不标题党，长度控制在 25 个字以内。",
+                "content": (
+                    "你是一个严谨的中文新闻编辑，请将新闻正文提炼成一句中文摘要，"
+                    "要求：客观、不夸张、不标题党，长度控制在 25 个字以内。"
+                ),
             },
             {
                 "role": "user",
@@ -129,6 +141,8 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
 
 
 # ================== 列表抓取 ==================
+
+
 def fetch_list(page: int = 1):
     """
     抓取指定页码的文章列表，使用正确的相对路径拼接。
@@ -173,7 +187,7 @@ def fetch_list(page: int = 1):
         if not re.search(r"content_\d+\.htm", href):
             continue
 
-        # 3. 【核心修正】使用 current_list_url 进行拼接
+        # 3. 使用 current_list_url 进行拼接
         url_full = urljoin(current_list_url, href)
 
         items.append(
@@ -191,6 +205,8 @@ def fetch_list(page: int = 1):
 
 
 # ================== 正文抓取 ==================
+
+
 def fetch_article_content(item: dict):
     """
     请求文章正文内容
@@ -237,6 +253,8 @@ def fetch_article_content(item: dict):
 
 
 # ================== CSV 保存 ==================
+
+
 def save_to_csv(data: list, filename: str):
     if not data:
         print("💡 没有数据可保存。")
@@ -253,6 +271,8 @@ def save_to_csv(data: list, filename: str):
 
 
 # ================== 生成 Markdown ==================
+
+
 def build_markdown(items: list) -> str:
     """
     生成一个 Markdown 字符串：
@@ -285,6 +305,8 @@ def save_markdown(content: str, filename: str):
 
 
 # ================== 主流程 ==================
+
+
 def main():
     all_articles = []
     print(f"=== 🚀 爬虫启动 (目标日期: {TARGET_DATE}) ===")
