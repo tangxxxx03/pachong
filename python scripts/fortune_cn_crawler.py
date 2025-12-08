@@ -1,40 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- SiliconFlow AI 摘要 & Markdown 版（带详细报错）
+财富中文网 商业频道爬虫（PC 版） + SiliconFlow AI 摘要 + 钉钉 Markdown 推送
 
 功能：
 1. 抓取财富中文网·商业频道指定日期的新闻（默认抓“北京时间昨天”的）。
 2. 修复列表页 href 相对路径（c/2025-12/07/...）丢失 /shangye/ 的问题。
-3. 调用 SiliconFlow OpenAI 兼容接口生成「一句话中文摘要」。
-4. 导出 CSV（包含原始标题 + AI 摘要 + 日期 + URL + 正文）。
-5. 生成 Markdown 列表（每条 [AI 摘要](URL)），适合钉钉 Markdown 群发。
+3. 调用 SiliconFlow（OpenAI 兼容接口）生成「一句话中文摘要」。
+4. 导出 CSV（标题 + AI 摘要 + 日期 + URL + 正文）。
+5. 生成 Markdown 列表（每条 [AI 摘要](URL)）。
+6. 将 Markdown 内容通过钉钉机器人推送到群里（支持多机器人）。
 
-环境变量（建议用 GitHub Secrets 配置）：
-- OPENAI_API_KEY : 你的 SiliconFlow API Key（sk-开头的那串）。
-- AI_API_BASE    : 可选，基础地址，推荐填 https://api.siliconflow.cn/v1
-- AI_MODEL       : 可选，使用的模型名，默认 Qwen/Qwen2.5-7B-Instruct
-- TARGET_DATE    : 可选，指定抓取哪一天（YYYY-MM-DD），不设则默认“北京时间昨天”。
+依赖（requirements.txt）：
+- requests
+- beautifulsoup4
 """
 
 import os
 import re
 import time
 import csv
+import hmac
+import base64
+import hashlib
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urljoin, quote_plus
 
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 
-# ================== 基本配置 ==================
+# ============= 抓取基础配置 =============
 
 BASE = "https://www.fortunechina.com"
-# 列表页 URL，务必以 / 结尾，方便 urljoin
 LIST_URL_BASE = "https://www.fortunechina.com/shangye/"
 MAX_PAGES = 3
 MAX_RETRY = 3
 
-OUTPUT_FILENAME = "fortunechina_articles_with_ai_title.csv"
+OUTPUT_CSV = "fortunechina_articles_with_ai_title.csv"
 OUTPUT_MD = "fortunechina_articles_with_ai_title.md"
 
 
@@ -55,20 +56,6 @@ def get_target_date() -> str:
 
 TARGET_DATE = get_target_date()
 
-# ================== SiliconFlow AI 配置 ==================
-
-# 从环境变量读取 Key（GitHub Secrets: OPENAI_API_KEY）
-AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
-# 商家说明：基础地址 https://api.siliconflow.cn/v1
-AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
-
-# ChatCompletions URL => https://api.siliconflow.cn/v1/chat/completions
-AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
-
-# 模型名称：如果你在商家后台看到别的，就把那一串填到 Secrets 的 AI_MODEL 中
-AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -81,25 +68,33 @@ DEFAULT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# ================== AI 摘要函数 ==================
+# ============= SiliconFlow AI 配置 =============
+
+# 你的 sk- 开头的 Key（从 GitHub Secrets 的 OPENAI_API_KEY 传进来）
+AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+# 商家给的基础地址：https://api.siliconflow.cn/v1
+AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
+
+# ChatCompletions 完整 URL
+AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
+
+# 模型：如果你在商家后台看到别的，就填完整模型名到 Secrets 的 AI_MODEL
+AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 
 def get_ai_summary(content: str, fallback_title: str = "") -> str:
     """
-    使用 SiliconFlow OpenAI 兼容接口生成一句话摘要。
+    使用 SiliconFlow 生成一句话摘要。
     - content: 文章正文
-    - fallback_title: 若 AI 调用失败则退回的标题（可以传原始标题）
+    - fallback_title: AI 失败时用原始标题兜底
     """
     if not content or len(content) < 30:
         return fallback_title or "内容过短，无需摘要"
 
     if not AI_API_KEY:
-        print("  ⚠️ 未配置 OPENAI_API_KEY（SiliconFlow API Key），跳过 AI 摘要。")
+        print("  ⚠️ 未配置 OPENAI_API_KEY，跳过 AI 摘要。")
         return fallback_title or "（未配置 AI 摘要）"
-
-    if not AI_MODEL:
-        print("  ⚠️ 未配置 AI_MODEL（模型名），跳过 AI 摘要。")
-        return fallback_title or "（未配置模型名）"
 
     headers = {
         "Accept": "application/json",
@@ -114,7 +109,7 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
                 "role": "system",
                 "content": (
                     "你是一个严谨的中文新闻编辑，请将新闻正文提炼成一句中文摘要，"
-                    "要求：客观、不夸张、不标题党，长度控制在 25 个字以内。"
+                    "要求：客观、务实、不标题党，长度控制在 25 个字以内。"
                 ),
             },
             {
@@ -131,9 +126,8 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
     try:
         resp = requests.post(AI_CHAT_URL, headers=headers, json=payload, timeout=30)
 
-        # 这里先不 raise，先把错误信息打出来
         if resp.status_code != 200:
-            print(f"  ❌ AI 返回非 200 状态码：{resp.status_code}")
+            print(f"  ❌ AI 状态码：{resp.status_code}")
             try:
                 print("  ❌ AI 返回内容：", resp.text)
             except Exception:
@@ -142,7 +136,7 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
 
         data = resp.json()
         summary = data["choices"][0]["message"]["content"].strip()
-        summary = summary.splitlines()[0].strip()  # 只取第一行
+        summary = summary.splitlines()[0].strip()
         print(f"  ✨ AI 摘要：{summary}")
         return summary or (fallback_title or "（AI 摘要为空）")
 
@@ -151,15 +145,13 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         return fallback_title or f"[AI 调用失败: {e}]"
 
 
-# ================== 列表抓取 ==================
+# ============= 列表页抓取 =============
 
 
 def fetch_list(page: int = 1):
     """
-    抓取指定页码的文章列表，使用正确的相对路径拼接。
-    保留你原来 V8 版本的解析逻辑。
+    抓取指定页码的文章列表（使用 current_list_url 修复相对路径）。
     """
-    # 构造当前列表页的完整 URL
     if page == 1:
         current_list_url = LIST_URL_BASE
     else:
@@ -188,15 +180,14 @@ def fetch_list(page: int = 1):
         href = a["href"].strip()
         pub_date = date_div.get_text(strip=True) if date_div else ""
 
-        # 1. 日期过滤：只处理 TARGET_DATE
+        # 只要目标日期的
         if pub_date != TARGET_DATE:
             continue
 
-        # 2. 简单的正则检查，只要包含 content_数字 即可
+        # 只要包含 content_数字 的链接
         if not re.search(r"content_\d+\.htm", href):
             continue
 
-        # 3. 使用 current_list_url 进行拼接
         url_full = urljoin(current_list_url, href)
 
         items.append(
@@ -213,7 +204,7 @@ def fetch_list(page: int = 1):
     return items
 
 
-# ================== 正文抓取 ==================
+# ============= 正文抓取 =============
 
 
 def fetch_article_content(item: dict):
@@ -259,17 +250,18 @@ def fetch_article_content(item: dict):
                 item["content"] = f"[获取失败: {e}]"
 
 
-# ================== CSV 保存 ==================
+# ============= 保存 CSV =============
 
 
 def save_to_csv(data: list, filename: str):
     if not data:
         print("💡 没有数据可保存。")
         return
+
     fieldnames = ["title", "ai_summary", "date", "url", "content"]
     try:
-        with open(filename, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(data)
         print(f"\n🎉 成功保存到 CSV：{filename}，共 {len(data)} 条。")
@@ -277,10 +269,13 @@ def save_to_csv(data: list, filename: str):
         print(f"\n❌ CSV 保存失败：{e}")
 
 
-# ================== 生成 Markdown ==================
+# ============= 生成 Markdown =============
 
 
 def build_markdown(items: list) -> str:
+    """
+    生成适合钉钉发送的 Markdown 文本。
+    """
     if not items:
         return f"### 财富中文网·商业频道精选（{TARGET_DATE}）\n\n今日未抓到符合条件的新闻。"
 
@@ -301,12 +296,74 @@ def save_markdown(content: str, filename: str):
     try:
         with open(filename, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"\n📄 已保存 Markdown 到文件：{filename}")
+        print(f"\n📄 已保存 Markdown 文件：{filename}")
     except Exception as e:
-        print(f"\n❌ Markdown 文件保存失败：{e}")
+        print(f"\n❌ Markdown 保存失败：{e}")
 
 
-# ================== 主流程 ==================
+# ============= 钉钉 Markdown 推送 =============
+
+
+def sign_dingtalk(secret: str, timestamp_ms: int) -> str:
+    """
+    按钉钉官方文档生成签名。
+    """
+    string_to_sign = f"{timestamp_ms}\n{secret}"
+    hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    return quote_plus(base64.b64encode(hmac_code))
+
+
+def send_dingtalk_markdown(title: str, text: str):
+    """
+    将 Markdown 文本发送到一个或多个钉钉机器人。
+    需要环境变量：
+    - DINGTALK_BASES   : webhook 基础 URL，多个用英文逗号分隔
+    - DINGTALK_SECRETS : 对应的 secret，多个用英文逗号分隔
+    """
+    bases_raw = os.getenv("DINGTALK_BASES", "").strip()
+    secrets_raw = os.getenv("DINGTALK_SECRETS", "").strip()
+
+    if not bases_raw or not secrets_raw:
+        print("💡 未配置 DINGTALK_BASES / DINGTALK_SECRETS，跳过钉钉推送。")
+        return
+
+    bases = [b.strip() for b in bases_raw.split(",") if b.strip()]
+    secrets = [s.strip() for s in secrets_raw.split(",") if s.strip()]
+
+    if not bases or len(bases) != len(secrets):
+        print("⚠️ DINGTALK_BASES 与 DINGTALK_SECRETS 数量不一致，跳过钉钉推送。")
+        return
+
+    for idx, (base_url, secret) in enumerate(zip(bases, secrets), start=1):
+        try:
+            ts = int(time.time() * 1000)
+            sign = sign_dingtalk(secret, ts)
+            full_url = f"{base_url}&timestamp={ts}&sign={sign}"
+
+            payload = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": title,
+                    "text": text,
+                },
+                "at": {
+                    "isAtAll": False,
+                },
+            }
+
+            print(f"\n📨 正在向第 {idx} 个钉钉机器人发送消息...")
+            resp = requests.post(full_url, json=payload, timeout=10)
+            print(f"  钉钉返回状态码：{resp.status_code}")
+            try:
+                print("  钉钉返回：", resp.text)
+            except Exception:
+                pass
+
+        except Exception as e:
+            print(f"  ⚠️ 第 {idx} 个钉钉机器人发送失败：{e}")
+
+
+# ============= 主流程 =============
 
 
 def main():
@@ -345,13 +402,17 @@ def main():
         if "获取失败" not in item["content"] and item["content"]
     )
     print(f"\n=== 统计: 成功 {success_count} 篇，失败 {len(all_articles) - success_count} 篇 ===")
-    save_to_csv(all_articles, OUTPUT_FILENAME)
+    save_to_csv(all_articles, OUTPUT_CSV)
 
-    # 4. 生成 Markdown 预览 & 保存
+    # 4. 生成 Markdown
     md_content = build_markdown(all_articles)
     print("\n=== Markdown 预览（可用于钉钉 Markdown 消息） ===\n")
     print(md_content)
     save_markdown(md_content, OUTPUT_MD)
+
+    # 5. 推送到钉钉
+    md_title = f"财富中文网·商业频道精选（{TARGET_DATE}）"
+    send_dingtalk_markdown(md_title, md_content)
 
 
 if __name__ == "__main__":
