@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- V4 最终修复版
+财富中文网 商业频道爬虫（PC 版结构）- V5 终极修复版
 
 功能：
-1. 【关键修复】URL 提取逻辑：强制在链接前添加 /shangye/ 路径，解决 404 错误。
+1. 【核心修复】恢复正确的 URL 拼接逻辑，并更新 User-Agent 避免服务器拦截 404。
 2. 支持多页列表抓取（默认前 3 页）。
 3. 自动获取每篇文章的完整正文。
 4. 将结果保存为 CSV 文件。
@@ -14,32 +14,35 @@ import time
 import requests
 import csv
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 # --- 配置参数 ---
 BASE = "https://www.fortunechina.com"
-CHANNEL_PATH = "/shangye" # 频道路径
 MAX_PAGES = 3  
 MAX_RETRY = 3 
 OUTPUT_FILENAME = "fortunechina_articles.csv"
 # ----------------
 
 session = requests.Session()
+# 调整 User-Agent 为最新 Chrome 版本，并添加 Accept 头部
 session.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120 Safari/537.36"
+        "Chrome/126.0.0.0 Safari/537.36" # 使用更新的版本号
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
+    # 移除 Referer，让其自然发送，或者在 fetch_article_content 中单独设置
 })
 
 
 def fetch_list(page=1):
     """
-    抓取指定页码的文章列表，并修复 URL 路径。
+    抓取指定页码的文章列表，采用原始、标准的 URL 拼接。
     """
-    url = f"{BASE}{CHANNEL_PATH}/" if page == 1 else f"{BASE}{CHANNEL_PATH}/?page={page}"
+    # 列表页 URL 结构不变
+    url = f"{BASE}/shangye/" if page == 1 else f"{BASE}/shangye/?page={page}"
     print(f"\n--- 正在请求列表页: 第 {page} 页 ---")
 
     try:
@@ -62,24 +65,13 @@ def fetch_list(page=1):
             
         href = a["href"].strip()
         
-        # 严格校验链接格式：/YYYY-MM/DD/content_ID.htm
-        match = re.search(r"(/(\d{4}-\d{2}/\d{2})/content_\d+\.htm)", href)
-        if not match:
+        # 1. 严格校验链接格式：/YYYY-MM/DD/content_ID.htm
+        if not re.search(r"/\d{4}-\d{2}/\d{2}/content_\d+\.htm", href):
             continue
-            
-        # **【解决 404 问题的核心】**：强制在链接前添加频道路径
-        # href 示例: /2025-12/07/content_470761.htm
-        # 修复后: /shangye/2025-12/07/content_470761.htm
-        
-        # 1. 确保 href 不以频道路径开头，防止重复添加
-        if not href.startswith(CHANNEL_PATH):
-            # 拼接频道路径和 href (注意 CHANNEL_PATH 已经是 /shangye)
-            fixed_href = f"{CHANNEL_PATH}{href}"
-        else:
-            fixed_href = href
-            
-        # 2. 生成完整的绝对 URL
-        url_full = urljoin(BASE, fixed_href) 
+
+        # 2. 【核心修复】使用最标准的 urljoin 拼接，不手动添加 /shangye
+        # 目标链接应该是：https://www.fortunechina.com/YYYY-MM/DD/content_ID.htm
+        url_full = urljoin(BASE, href) 
         
         title = h2.get_text(strip=True)
         pub_date = date_div.get_text(strip=True) if date_div else ""
@@ -101,9 +93,14 @@ def fetch_article_content(item):
     """
     url = item["url"]
     
+    # 针对正文请求，添加 Referer 头部，模拟从列表页点击进入
+    headers = session.headers.copy()
+    headers["Referer"] = f"{BASE}/shangye/" # 列表页 URL
+
     for attempt in range(MAX_RETRY):
         try:
-            r = session.get(url, timeout=15)
+            # 使用包含 Referer 的头部进行请求
+            r = requests.get(url, headers=headers, timeout=15)
             r.raise_for_status() 
 
             soup = BeautifulSoup(r.text, "html.parser")
@@ -118,12 +115,18 @@ def fetch_article_content(item):
             time.sleep(0.5) 
             return
 
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.HTTPError as e:
             if r.status_code == 404:
+                # 记录 404 错误，不再重试
                 print(f"  ⚠️ 404 链接无效，放弃重试：{url}")
                 item["content"] = f"[正文获取失败: 404 Not Found]"
                 return
             
+            print(f"  ❌ 正文请求失败，正在重试第 {attempt + 1}/{MAX_RETRY} 次 ({url}): {e}")
+            time.sleep(2 ** attempt) 
+        
+        except requests.exceptions.RequestException as e:
+            # 处理其他请求错误，如超时、连接错误
             print(f"  ❌ 正文请求失败，正在重试第 {attempt + 1}/{MAX_RETRY} 次 ({url}): {e}")
             time.sleep(2 ** attempt) 
             
@@ -173,17 +176,15 @@ def main():
     # 2. 遍历所有文章，抓取正文
     count = 0
     for item in all_articles:
-        # 跳过已确认失败或 URL 不完整的文章，减少不必要的请求
-        if item["url"].endswith(".htm"):
-            count += 1
-            print(f"🔥 正在处理第 {count}/{len(all_articles)} 篇：{item['title']}")
-            fetch_article_content(item)
-        else:
-            item["content"] = "https://context.reverso.net/translation/chinese-english/%E6%A0%BC%E5%BC%8F%E4%B8%8D%E6%AD%A3%E7%A1%AE"
+        count += 1
+        print(f"🔥 正在处理第 {count}/{len(all_articles)} 篇：{item['title']}")
+        fetch_article_content(item)
         
-    # ... (打印预览和统计结果部分省略，流程保持不变)
+    # 3. 统计失败文章数
+    failed_count = sum(1 for item in all_articles if item["content"].startswith("[正文获取失败"))
+    print(f"\n=== 统计结果：成功获取 {len(all_articles) - failed_count} 篇，失败 {failed_count} 篇。===")
 
-    # 5. 保存为 CSV 文件
+    # 4. 保存为 CSV 文件
     save_to_csv(all_articles, OUTPUT_FILENAME)
     
     return all_articles
