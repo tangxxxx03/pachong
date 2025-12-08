@@ -1,45 +1,18 @@
-# -*- coding: utf-8 -*-
-"""
-财富中文网 商业频道爬虫（PC 版结构）- V3 增强版
-
-功能：
-1. 优化 URL 提取逻辑，解决 404 错误。
-2. 支持多页列表抓取（默认前 3 页）。
-3. 自动获取每篇文章的完整正文。
-4. **新增：将结果保存为 CSV 文件。**
-"""
-
 import re
 import time
-import requests
-import csv
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+from datetime import datetime
 
-# --- 配置参数 ---
-BASE = "https://www.fortunechina.com"
-MAX_PAGES = 3  # 设置您希望抓取的最大页数
-MAX_RETRY = 3  # 正文请求失败最大重试次数
-OUTPUT_FILENAME = "fortunechina_articles.csv" # CSV 文件名
-# ----------------
-
-session = requests.Session()
-session.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120 Safari/537.36"
-    ),
-    "Accept-Encoding": "gzip, deflate, br",
-})
-
+# ... (其他导入和 BASE/session 设置保持不变) ...
 
 def fetch_list(page=1):
     """
-    抓取指定页码的文章列表。
+    抓取指定页码的文章列表，并修复可能不完整的 URL。
     """
     url = f"{BASE}/shangye/" if page == 1 else f"{BASE}/shangye/?page={page}"
     print(f"\n--- 正在请求列表页: 第 {page} 页 ---")
+
+    # ... (请求和 soup 部分保持不变) ...
 
     try:
         r = session.get(url, timeout=15)
@@ -51,6 +24,9 @@ def fetch_list(page=1):
     soup = BeautifulSoup(r.text, "html.parser")
     items = []
     
+    # 获取今天的日期，用于修复可能不完整的 URL 路径
+    today_path = datetime.now().strftime("/%Y-%m/%d")
+
     for li in soup.select("ul.news-list li.news-item"):
         h2 = li.find("h2")
         a = li.find("a", href=True)
@@ -61,17 +37,38 @@ def fetch_list(page=1):
             
         href = a["href"].strip()
         
-        # 严格校验链接格式：/YYYY-MM/DD/content_ID.htm
-        if not re.search(r"/\d{4}-\d{2}/\d{2}/content_\d+\.htm", href):
+        # 1. 检查 href 是否包含完整的日期路径：/YYYY-MM/DD/content_ID.htm
+        if re.match(r"/\d{4}-\d{2}/\d{2}/content_\d+\.htm", href):
+            # 路径完整，直接使用
+            url_to_fetch = urljoin(BASE, href)
+        
+        # 2. 检查 href 是否是缺失日期路径的：/content_ID.htm
+        elif re.match(r"/content_\d+\.htm", href):
+            # 路径缺失，尝试用当天日期路径修复
+            print(f"  ⚠️ 链接缺少日期路径，尝试修复: {href}")
+            
+            # 从 date div 获取发布日期（如果存在），以便更精确地修复路径
+            pub_date_str = date_div.get_text(strip=True) if date_div else ""
+            
+            if re.match(r"\d{4}-\d{2}-\d{2}", pub_date_str):
+                # 假设发布日期格式为 YYYY-MM-DD
+                # 构造正确的路径 /YYYY-MM/DD
+                correct_path_prefix = pub_date_str.replace('-', '/')
+                url_to_fetch = urljoin(BASE, f"/{correct_path_prefix}{href}")
+            else:
+                # 如果无法从日期 div 获取，则退回到使用今天的日期路径
+                url_to_fetch = urljoin(BASE, f"{today_path}{href}")
+
+        else:
+            # 不符合任何文章格式，跳过
             continue
 
         title = h2.get_text(strip=True)
-        url_full = urljoin(BASE, href) 
         pub_date = date_div.get_text(strip=True) if date_div else ""
 
         items.append({
             "title": title,
-            "url": url_full,
+            "url": url_to_fetch, # 使用修复后的 URL
             "date": pub_date,
             "content": "",
         })
@@ -79,113 +76,4 @@ def fetch_list(page=1):
     print(f"  ✅ 第 {page} 页抓到文章数：{len(items)}")
     return items
 
-
-def fetch_article_content(item):
-    """
-    请求文章正文内容，并包含失败重试机制。
-    """
-    url = item["url"]
-    
-    for attempt in range(MAX_RETRY):
-        try:
-            r = session.get(url, timeout=15)
-            r.raise_for_status() 
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            container = soup.select_one("div.article-mod div.word-text-con")
-
-            if not container:
-                item["content"] = "[正文内容容器未找到]"
-                return
-
-            paras = [p.get_text(strip=True) for p in container.find_all("p") if p.get_text(strip=True)]
-            item["content"] = "\n".join(paras)
-            time.sleep(0.5) 
-            return
-
-        except requests.exceptions.RequestException as e:
-            if r.status_code == 404:
-                print(f"  ⚠️ 404 链接无效，放弃重试：{url}")
-                item["content"] = f"[正文获取失败: 404 Not Found]"
-                return
-            
-            print(f"  ❌ 正文请求失败，正在重试第 {attempt + 1}/{MAX_RETRY} 次 ({url}): {e}")
-            time.sleep(2 ** attempt) 
-            
-    item["content"] = f"[正文获取失败: 超过最大重试次数]"
-    print(f"  ⛔️ 正文获取失败，超过最大重试次数：{url}")
-
-
-def save_to_csv(data: list, filename: str):
-    """
-    将文章数据列表保存到 CSV 文件中。
-    """
-    if not data:
-        print("💡 没有数据可保存。")
-        return
-        
-    # 定义 CSV 文件的表头（列名）
-    fieldnames = ["title", "date", "url", "content"]
-    
-    try:
-        # 'w' 写入模式，newline='' 确保在 Windows 上不会出现额外的空行
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-            # 写入表头
-            writer.writeheader()
-
-            # 写入每一行数据
-            writer.writerows(data)
-            
-        print(f"\n🎉 数据保存成功！文件名为：{filename}，共 {len(data)} 条记录。")
-    except Exception as e:
-        print(f"\n❌ CSV 文件写入失败：{e}")
-
-
-def main():
-    all_articles = []
-    
-    print(f"=== 🚀 财富中文网爬虫开始执行（目标页数：{MAX_PAGES}） ===")
-
-    # 1. 实现多页抓取循环
-    for page in range(1, MAX_PAGES + 1):
-        list_items = fetch_list(page)
-        
-        if not list_items:
-            print(f"--- 第 {page} 页没有抓到文章，停止翻页 ---")
-            break
-            
-        all_articles.extend(list_items)
-        time.sleep(1) 
-    
-    print(f"\n=== 📥 列表抓取完成，共收集到 {len(all_articles)} 篇文章链接。===")
-
-    # 2. 遍历所有文章，抓取正文
-    count = 0
-    for item in all_articles:
-        count += 1
-        print(f"🔥 正在处理第 {count}/{len(all_articles)} 篇：{item['title']}")
-        fetch_article_content(item)
-        
-    print("\n=== 🎯 正文抓取完成，预览前 5 篇文章：===")
-
-    # 3. 打印前 5 篇文章，验证数据完整性 (省略，确保流程流畅)
-    for item in all_articles[:5]:
-        print("---")
-        print(f"标题: {item['title']}")
-        content_preview = item["content"][:200] + "..." if len(item["content"]) > 200 else item["content"]
-        print(f"正文预览: {content_preview}")
-        
-    # 4. 统计失败文章数
-    failed_count = sum(1 for item in all_articles if item["content"].startswith("[正文获取失败"))
-    print(f"\n=== 统计结果：成功获取 {len(all_articles) - failed_count} 篇，失败 {failed_count} 篇。===")
-
-    # 5. 【新增】保存为 CSV 文件
-    save_to_csv(all_articles, OUTPUT_FILENAME)
-    
-    return all_articles
-
-
-if __name__ == "__main__":
-    main()
+# ... (main, save_to_csv, fetch_article_content 保持不变) ...
