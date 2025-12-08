@@ -791,19 +791,18 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
     if not merged_items:
         return (
             f"日期：{today_str}（{weekday_str}）  \n"
-            f"标题：人资日报｜每日要点\n"
+            f"标题：**人资日报｜每日要点**\n"
             "今日未抓取到有效资讯。"
         )
 
-    # 题头：在“日期”行尾加两个空格，强制换行
-lines = [
-    f"日期：{today_str}（{weekday_str}）  ",
-    f"**标题：人资日报｜每日要点**",
-    ""
-]
+    # 题头：日期行尾两个空格，强制换行；标题加粗
+    lines = [
+        f"日期：{today_str}（{weekday_str}）  ",
+        "标题：**人资日报｜每日要点**",
+        ""
+    ]
 
-
-    # 列表：最后一条句号，其余分号
+    # 内容：最后一条句号，其余分号
     for idx, item in enumerate(merged_items, start=1):
         title = item["title"]
         url = item["url"]
