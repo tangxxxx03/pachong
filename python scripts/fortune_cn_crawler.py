@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- 动态日期 + AI 标题 + Markdown 链接版
+财富中文网 商业频道爬虫（PC 版结构）
+- 动态日期（默认抓昨天） + AI 标题 + Markdown 链接版
 
 功能：
 1. 列表页：支持多页抓取（默认前 3 页），基于列表页 URL 做相对路径拼接，避免丢失 /shangye/ 目录。
-2. 日期限定：默认抓「今天（北京时区）」的文章，可通过环境变量 TARGET_DATE 手动指定日期。
+2. 日期限定：
+   - 默认抓「北京时区的昨天」（满足你要“过去 24 小时”的需求）；
+   - 若设置环境变量 TARGET_DATE，则优先抓指定日期（YYYY-MM-DD）。
 3. 正文抓取：带 Referer、模拟真实浏览器头，支持简单重试。
 4. AI 概括：用大模型根据正文生成一句「内部用」标题，准确概括内容，避免标题党。
 5. 输出：
@@ -43,16 +46,18 @@ OUTPUT_MD = "fortunechina_articles_with_ai_title.md"
 def get_target_date() -> str:
     """
     决定要抓取的目标日期：
-    1. 如果环境变量 TARGET_DATE 存在（例如 2025-12-07），优先用它；
-    2. 否则使用「今天的北京日期」，格式 yyyy-mm-dd。
+
+    1. 如果环境变量 TARGET_DATE 存在（例如 "2025-12-07"），优先使用；
+    2. 否则使用「北京时区的昨天」，格式 yyyy-mm-dd。
+       —— 也就是“过去 24 小时内的新闻”，满足你要爬“昨天”的需求。
     """
     env_date = os.getenv("TARGET_DATE", "").strip()
     if env_date:
         return env_date
 
     tz_cn = timezone(timedelta(hours=8))
-    today_cn = datetime.now(tz_cn).strftime("%Y-%m-%d")
-    return today_cn
+    yesterday_cn = (datetime.now(tz_cn) - timedelta(days=1)).strftime("%Y-%m-%d")
+    return yesterday_cn
 
 
 TARGET_DATE = get_target_date()
@@ -117,7 +122,7 @@ def fetch_list(page: int):
         href = a.get("href", "").strip()
         pub_date_raw = date_div.get_text(strip=True)
 
-        # 日期格式可能是 "2025-12-08" 或 "2025-12-08 09:00"
+        # 日期格式可能是 "2025-12-07" 或 "2025-12-07 09:00"
         if not pub_date_raw.startswith(TARGET_DATE):
             continue
 
@@ -284,7 +289,6 @@ def build_markdown(items: list) -> str:
     for idx, item in enumerate(items, start=1):
         title = item.get("ai_title") or item.get("title") or "（无标题）"
         url = item.get("url", "")
-        # 最核心一行：Markdown 链接
         lines.append(f"{idx}. [{title}]({url})")
 
     return "\n".join(lines)
