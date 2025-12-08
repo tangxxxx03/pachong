@@ -794,6 +794,16 @@ def send_dingtalk_markdown(title: str, text: str):
 
 # ===================== 四、合并 Markdown：统一编号 + 标题可点击 =====================
 
+def _strip_trailing_punc(title: str) -> str:
+    """
+    去掉标题末尾多余的句号/分号/感叹号/逗号等，然后再统一加“；”。
+    避免出现“。；”“；；”这种重复标点。
+    """
+    if not title:
+        return ""
+    return re.sub(r"[；;。.!！?？、，,]+$", "", title.strip())
+
+
 def build_clean_markdown(hr_items: list, fc_items: list) -> str:
     """
     把三茅日报 + 财富商业频道 合并为一条 Markdown 文本：
@@ -812,7 +822,7 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
         it = hr_items[0]
         detail_url = it.get("url", "")
         for t in it["titles"]:
-            title = t.strip()
+            title = _strip_trailing_punc(t)
             if not title:
                 continue
             merged_items.append({
@@ -822,7 +832,8 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
 
     # 再放财富新闻（使用 AI 摘要作为标题优先）
     for art in fc_items or []:
-        title = (art.get("ai_summary") or art.get("title") or "").strip()
+        raw_title = (art.get("ai_summary") or art.get("title") or "")
+        title = _strip_trailing_punc(raw_title)
         if not title:
             continue
         merged_items.append({
