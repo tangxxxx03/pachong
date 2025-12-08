@@ -183,14 +183,7 @@ class HRLooCrawler:
 
     def crawl(self):
         """
-        尝试从所有 sources 中找到“符合 target_date 的三茅日报”，
-        命中后 self.results[0] 形如：
-        {
-            "title": 页面标题,
-            "url": 详情链接,
-            "date": "YYYY-MM-DD HH:MM",
-            "titles": [要点1, 要点2, ...]
-        }
+        尝试从所有 sources 中找到“符合 target_date 的三茅日报”
         """
         for base in self.sources:
             if self._crawl_source(base):
@@ -419,15 +412,9 @@ FC_OUTPUT_MD = "fortunechina_articles_with_ai_title.md"
 
 
 def get_target_date() -> str:
-    """
-    决定财富中文网要抓取的目标日期：
-    1. 如果设置了环境变量 TARGET_DATE（例如 "2025-12-07"），优先用它；
-    2. 否则默认抓「北京时间昨天」，格式 YYYY-MM-DD。
-    """
     env_date = os.getenv("TARGET_DATE", "").strip()
     if env_date:
         return env_date
-
     tz_cn = timezone(timedelta(hours=8))
     yesterday_cn = (datetime.now(tz_cn) - timedelta(days=1)).strftime("%Y-%m-%d")
     return yesterday_cn
@@ -447,7 +434,6 @@ FC_DEFAULT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# SiliconFlow / OpenAI 兼容配置
 AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
 AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
@@ -455,9 +441,6 @@ AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 
 def get_ai_summary(content: str, fallback_title: str = "") -> str:
-    """
-    使用 SiliconFlow 生成一句话摘要（长度控制在 25 个字以内）。
-    """
     if not content or len(content) < 30:
         return fallback_title or "内容过短，无需摘要"
 
@@ -515,9 +498,6 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
 
 
 def fc_fetch_list(page: int = 1):
-    """
-    财富中文网：抓取指定页码的文章列表。
-    """
     if page == 1:
         current_list_url = FC_LIST_URL_BASE
     else:
@@ -546,11 +526,9 @@ def fc_fetch_list(page: int = 1):
         href = a["href"].strip()
         pub_date = date_div.get_text(strip=True) if date_div else ""
 
-        # 只要目标日期的
         if pub_date != FC_TARGET_DATE:
             continue
 
-        # 只要包含 content_数字 的链接
         if not re.search(r"content_\d+\.htm", href):
             continue
 
@@ -573,9 +551,6 @@ def fc_fetch_list(page: int = 1):
 
 
 def fc_fetch_article_content(item: dict):
-    """
-    请求财富文章正文内容
-    """
     url = item["url"]
     headers = FC_DEFAULT_HEADERS.copy()
     headers["Referer"] = FC_LIST_URL_BASE
@@ -632,9 +607,6 @@ def fc_save_to_csv(data: list, filename: str):
 
 
 def fc_build_markdown(items: list) -> str:
-    """
-    财富单独 Markdown（仅文件保存用，不参与钉钉合并逻辑）。
-    """
     if not items:
         return (
             f"### 财富中文网·商业频道精选（{FC_TARGET_DATE}）\n\n"
@@ -664,17 +636,12 @@ def fc_save_markdown(content: str, filename: str):
 
 
 def run_fortune_crawler():
-    """
-    执行财富中文网抓取 + AI 摘要 + 本地 CSV/MD 存储。
-    返回 all_articles（列表，每篇包含 ai_summary）。
-    """
     all_articles = []
     print(f"\n=== 🚀 财富爬虫启动 (目标日期: {FC_TARGET_DATE}) ===")
     print(
         f"=== 🛠️ 财富路径策略: 基于列表页 URL ({FC_LIST_URL_BASE}) 进行相对路径拼接 ==="
     )
 
-    # 1. 抓取列表
     for page in range(1, FC_MAX_PAGES + 1):
         list_items = fc_fetch_list(page)
         if not list_items:
@@ -690,7 +657,6 @@ def run_fortune_crawler():
         f"\n=== 📥 财富链接收集完成，共 {len(all_articles)} 篇。开始抓取正文 + 生成 AI 摘要... ==="
     )
 
-    # 2. 抓取正文 + AI 摘要
     count = 0
     for item in all_articles:
         count += 1
@@ -698,7 +664,6 @@ def run_fortune_crawler():
         fc_fetch_article_content(item)
         item["ai_summary"] = get_ai_summary(item["content"], item["title"])
 
-    # 3. 统计与保存 CSV/MD（仅本地调试用）
     success_count = sum(
         1
         for item in all_articles
@@ -717,16 +682,6 @@ def run_fortune_crawler():
 # ===================== 三、统一钉钉推送工具 =====================
 
 def send_dingtalk_markdown(title: str, text: str):
-    """
-    统一的钉钉 Markdown 发送函数。
-    优先使用多机器人：
-        - DINGTALK_BASES   : webhook 基础 URL，多个用英文逗号分隔
-        - DINGTALK_SECRETS : 对应的 secret，多个用英文逗号分隔
-    若未配置，则 fallback 到单机器人：
-        - DINGTALK_BASE / DINGTALK_BASEA
-        - DINGTALK_SECRET / DINGTALK_SECRETA
-    """
-    # 多机器人模式
     bases_raw = os.getenv("DINGTALK_BASES", "").strip()
     secrets_raw = os.getenv("DINGTALK_SECRETS", "").strip()
 
@@ -760,7 +715,6 @@ def send_dingtalk_markdown(title: str, text: str):
                 except Exception as e:
                     print(f"  ⚠️ 第 {idx} 个钉钉机器人发送失败：{e}")
 
-    # 单机器人 fallback
     base_single = os.getenv("DINGTALK_BASE") or os.getenv("DINGTALK_BASEA")
     secret_single = os.getenv("DINGTALK_SECRET") or os.getenv("DINGTALK_SECRETA")
 
@@ -796,8 +750,7 @@ def send_dingtalk_markdown(title: str, text: str):
 
 def _strip_trailing_punc(title: str) -> str:
     """
-    去掉标题末尾多余的句号/分号/感叹号/逗号等，然后再统一加“；”。
-    避免出现“。；”“；；”这种重复标点。
+    去掉标题末尾多余的句号/分号/感叹号/逗号等，然后再统一加分号或句号。
     """
     if not title:
         return ""
@@ -805,19 +758,13 @@ def _strip_trailing_punc(title: str) -> str:
 
 
 def build_clean_markdown(hr_items: list, fc_items: list) -> str:
-    """
-    把三茅日报 + 财富商业频道 合并为一条 Markdown 文本：
-    - 不再区分来源；
-    - 所有条目统一 1、2、3... 编号；
-    - 每条写成：[标题](URL)；  （点击标题即可跳转）；
-    """
     now_cn = now_tz()
     today_str = now_cn.strftime("%Y-%m-%d")
     weekday_str = zh_weekday(now_cn)
 
     merged_items = []
 
-    # 先放三茅 titles（同一篇文章，链接相同没问题）
+    # —— 三茅 titles ——
     if hr_items and hr_items[0].get("titles"):
         it = hr_items[0]
         detail_url = it.get("url", "")
@@ -830,7 +777,7 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
                 "url": detail_url or "#"
             })
 
-    # 再放财富新闻（使用 AI 摘要作为标题优先）
+    # —— 财富 AI 摘要 ——
     for art in fc_items or []:
         raw_title = (art.get("ai_summary") or art.get("title") or "")
         title = _strip_trailing_punc(raw_title)
@@ -841,7 +788,6 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
             "url": art.get("url", "#")
         })
 
-    # 如果今天啥也没抓到
     if not merged_items:
         return f"日期：{today_str}（{weekday_str}）\n今日未抓取到有效资讯。"
 
@@ -851,11 +797,14 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
         ""
     ]
 
+    # 关键逻辑：最后一条用句号，其余用分号
     for idx, item in enumerate(merged_items, start=1):
         title = item["title"]
         url = item["url"]
-        # 每条：编号 + 可点击标题 + 中文分号
-        lines.append(f"{idx}. [{title}]({url})；")
+        if idx == len(merged_items):
+            lines.append(f"{idx}. [{title}]({url})。")
+        else:
+            lines.append(f"{idx}. [{title}]({url})；")
 
     return "\n".join(lines)
 
@@ -865,23 +814,19 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
 def main():
     print("=== 执行合并爬虫：三茅 + 财富中文网 ===")
 
-    # 1. 三茅日报
     print("\n>>> [步骤1] 抓取三茅人力资源网 · 三茅日报")
     hr_crawler = HRLooCrawler()
     hr_crawler.crawl()
     hr_results = hr_crawler.results
 
-    # 2. 财富中文网
     print("\n>>> [步骤2] 抓取财富中文网 · 商业频道 + AI 摘要")
     fc_articles = run_fortune_crawler()
 
-    # 3. 合并 Markdown（新的统一编号 + 可点击标题样式）
     print("\n>>> [步骤3] 生成合并 Markdown 消息（统一编号 + 标题可点击）")
     combined_md = build_clean_markdown(hr_results, fc_articles)
     print("\n===== 合并 Markdown 预览 =====\n")
     print(combined_md)
 
-    # 4. 发送钉钉
     print("\n>>> [步骤4] 推送到钉钉机器人")
     md_title = f"人资 & 商业资讯日报（{now_tz().strftime('%Y-%m-%d')}）"
     send_dingtalk_markdown(md_title, combined_md)
