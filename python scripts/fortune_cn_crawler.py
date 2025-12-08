@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- V8 + AI 标题版
+财富中文网 商业频道爬虫（PC 版结构）- 动态日期 + AI 标题 + Markdown 链接版
 
 功能：
 1. 列表页：支持多页抓取（默认前 3 页），基于列表页 URL 做相对路径拼接，避免丢失 /shangye/ 目录。
-2. 日期限定：只抓取指定日期（默认 2025-12-07）的文章。
+2. 日期限定：默认抓「今天（北京时区）」的文章，可通过环境变量 TARGET_DATE 手动指定日期。
 3. 正文抓取：带 Referer、模拟真实浏览器头，支持简单重试。
 4. AI 概括：用大模型根据正文生成一句「内部用」标题，准确概括内容，避免标题党。
-5. 输出：保存为 CSV，字段包括：原始标题、AI 标题、日期、URL、正文。
+5. 输出：
+   - CSV：原始标题 + AI 标题 + 日期 + URL + 正文
+   - Markdown：每一行是 `[AI 标题](URL)`，可直接用于钉钉 Markdown 消息，标题可点击查看原文。
 """
 
 import os
@@ -15,6 +17,8 @@ import re
 import time
 import csv
 import json
+from datetime import datetime, timedelta, timezone
+
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -32,18 +36,32 @@ MAX_PAGES = 3
 MAX_RETRY = 3
 
 # 输出文件名
-OUTPUT_FILENAME = "fortunechina_articles_with_ai_title.csv"
+OUTPUT_CSV = "fortunechina_articles_with_ai_title.csv"
+OUTPUT_MD = "fortunechina_articles_with_ai_title.md"
 
-# 目标日期（只抓这一日的文章）
-TARGET_DATE = "2025-12-07"   # 格式：YYYY-MM-DD
+
+def get_target_date() -> str:
+    """
+    决定要抓取的目标日期：
+    1. 如果环境变量 TARGET_DATE 存在（例如 2025-12-07），优先用它；
+    2. 否则使用「今天的北京日期」，格式 yyyy-mm-dd。
+    """
+    env_date = os.getenv("TARGET_DATE", "").strip()
+    if env_date:
+        return env_date
+
+    tz_cn = timezone(timedelta(hours=8))
+    today_cn = datetime.now(tz_cn).strftime("%Y-%m-%d")
+    return today_cn
+
+
+TARGET_DATE = get_target_date()
 
 # ================== AI 接口配置 ==================
-# 建议在系统环境变量里配置：OPENAI_API_KEY
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
-# 这里以 OpenAI 兼容接口为例，你可以改成自己的网关地址
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL = "gpt-4.1-mini"  # 或你自己的模型名称
+OPENAI_MODEL = "gpt-4.1-mini"  # 如果你换成别的模型，改这里
+
 
 # ================== HTTP 头 ==================
 DEFAULT_HEADERS = {
@@ -83,14 +101,15 @@ def fetch_list(page: int):
 
     items = []
 
-    # 这里根据实际结构选一个尽量稳的选择器
-    # 财富中文网商业频道列表大致结构：div.list-mod / div.mod-list / li
-    # 如有偏差，你可以对照页面调一下选择器
+    # 根据页面结构选择器提取列表
     for box in soup.select("div.list-mod li, div.mod-list li, div.list-item"):
-        # 尝试取标题和链接
         h2 = box.find("h2") or box.find("h3")
         a = h2.find("a") if h2 else box.find("a")
-        date_div = box.find("span", class_="time") or box.find("div", class_="time") or box.find("span", class_="date")
+        date_div = (
+            box.find("span", class_="time")
+            or box.find("div", class_="time")
+            or box.find("span", class_="date")
+        )
 
         if not (h2 and a and date_div):
             continue
@@ -98,25 +117,26 @@ def fetch_list(page: int):
         href = a.get("href", "").strip()
         pub_date_raw = date_div.get_text(strip=True)
 
-        # 有的站会带时间，比如 "2025-12-07 10:23"
-        # 用 startswith，宽松匹配同一天
+        # 日期格式可能是 "2025-12-08" 或 "2025-12-08 09:00"
         if not pub_date_raw.startswith(TARGET_DATE):
             continue
 
-        # href 中必须含有 content_xxx.htm 才当成文章链接
+        # 链接中必须含有 content_xxx.htm 才认为是文章
         if not re.search(r"content_\d+\.htm", href):
             continue
 
-        # 【关键】基于当前列表页 URL 拼接，保证保留 /shangye/
+        # 【关键】基于当前列表页 URL 进行拼接，保留 /shangye/
         url_full = urljoin(current_list_url, href)
 
-        items.append({
-            "title": h2.get_text(strip=True),
-            "url": url_full,
-            "date": TARGET_DATE,
-            "content": "",
-            "ai_title": "",  # 预留字段，稍后填 AI 概括标题
-        })
+        items.append(
+            {
+                "title": h2.get_text(strip=True),
+                "url": url_full,
+                "date": TARGET_DATE,
+                "content": "",
+                "ai_title": "",
+            }
+        )
 
     print(f"  ✅ 第 {page} 页抓到目标日期({TARGET_DATE})文章数：{len(items)}")
     return items
@@ -130,8 +150,6 @@ def fetch_article_content(item: dict):
     """
     url = item["url"]
     headers = DEFAULT_HEADERS.copy()
-
-    # 模拟从列表页点击进入
     headers["Referer"] = LIST_URL_BASE
     headers["Sec-Fetch-Site"] = "same-origin"
     headers["Sec-Fetch-Mode"] = "navigate"
@@ -142,16 +160,13 @@ def fetch_article_content(item: dict):
             r.raise_for_status()
 
             soup = BeautifulSoup(r.text, "html.parser")
-
-            # 主选择器
             container = soup.select_one("div.article-mod div.word-text-con")
-            # 备用选择器
             if not container:
                 container = soup.select_one("div.article-content")
 
             if not container:
                 item["content"] = "[正文容器未找到]"
-                print(f"  ⚠️ 警告：URL {url} 访问成功但未找到正文容器")
+                print(f"  ⚠️ URL {url} 访问成功但未找到正文容器")
                 return
 
             paras = [
@@ -168,7 +183,7 @@ def fetch_article_content(item: dict):
                 print(f"  ❌ 正文请求失败，重试 {attempt + 1}/{MAX_RETRY} ... -> {url} | 错误: {e}")
                 time.sleep(1)
             else:
-                print(f"  ⛔️ 最终失败: {url} | 错误: {e}")
+                print(f"  ⛔️ 正文最终失败: {url} | 错误: {e}")
                 item["content"] = f"[获取失败: {e}]"
 
 
@@ -183,9 +198,7 @@ def ai_summarize_title(content: str, fallback_title: str) -> str:
         print("⚠️ 未配置 OPENAI_API_KEY，使用原始标题。")
         return fallback_title
 
-    # 文本太长会贵也会超 token，这里截一段上下文就够概括了
     if not content or content.startswith("[获取失败"):
-        # 没正文就没法概括，只能用原标题
         return fallback_title
 
     snippet = content[:2000]
@@ -204,7 +217,10 @@ def ai_summarize_title(content: str, fallback_title: str) -> str:
     payload = {
         "model": OPENAI_MODEL,
         "messages": [
-            {"role": "system", "content": "你是一名严谨的中文新闻编辑，只输出标题文本。"},
+            {
+                "role": "system",
+                "content": "你是一名严谨的中文新闻编辑，只输出新闻标题文本。",
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
@@ -212,16 +228,14 @@ def ai_summarize_title(content: str, fallback_title: str) -> str:
     }
 
     try:
-        resp = requests.post(OPENAI_API_URL, headers=headers, data=json.dumps(payload), timeout=30)
+        resp = requests.post(
+            OPENAI_API_URL, headers=headers, data=json.dumps(payload), timeout=30
+        )
         resp.raise_for_status()
         data = resp.json()
 
-        # 兼容 chat/completions 结构
         ai_title = data["choices"][0]["message"]["content"].strip()
-        # 防御：有些模型会输出多行说明，这里取首行
         ai_title = ai_title.splitlines()[0].strip()
-
-        # 极端情况下模型返回空，就回退
         return ai_title or fallback_title
 
     except Exception as e:
@@ -251,12 +265,50 @@ def save_to_csv(data: list, filename: str):
         print(f"\n❌ CSV 保存失败：{e}")
 
 
+# ================== 生成 Markdown（可点击链接） ==================
+def build_markdown(items: list) -> str:
+    """
+    生成一个 Markdown 字符串：
+    - 顶部是标题
+    - 每一行都是：1. [AI 标题](URL)
+    这个内容直接发到钉钉 markdown 消息里，标题就是可点击的超链接。
+    """
+    if not items:
+        return f"### 财富中文网·商业频道精选（{TARGET_DATE}）\n\n今日未抓到符合条件的新闻。"
+
+    lines = [
+        f"### 财富中文网·商业频道精选（{TARGET_DATE}）",
+        "",
+    ]
+
+    for idx, item in enumerate(items, start=1):
+        title = item.get("ai_title") or item.get("title") or "（无标题）"
+        url = item.get("url", "")
+        # 最核心一行：Markdown 链接
+        lines.append(f"{idx}. [{title}]({url})")
+
+    return "\n".join(lines)
+
+
+def save_markdown(content: str, filename: str):
+    """
+    将 Markdown 内容保存到文件（比如给后续钉钉推送脚本使用）。
+    """
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"\n📄 已保存 Markdown 到文件：{filename}")
+    except Exception as e:
+        print(f"\n❌ Markdown 文件保存失败：{e}")
+
+
 # ================== 主流程 ==================
 def main():
-    all_articles = []
+    print("Run ⚠️ 目录名里有空格，一定要加引号！")
+    print(f"=== 💐 财富中文网爬虫启动 (目标日期: {TARGET_DATE}) ===")
+    print(f"=== 🛠 路径策略: 基于列表页 URL ({LIST_URL_BASE}) 进行相对路径拼接 ===")
 
-    print(f"=== 🚀 财富中文网爬虫启动 (目标日期: {TARGET_DATE}) ===")
-    print(f"=== 🛠️ 路径策略: 基于列表页 URL ({LIST_URL_BASE}) 进行相对路径拼接 ===")
+    all_articles = []
 
     # 1. 抓取列表
     for page in range(1, MAX_PAGES + 1):
@@ -273,28 +325,34 @@ def main():
         all_articles.extend(list_items)
         time.sleep(1)
 
-    print(f"\n=== 📥 链接收集完成，共 {len(all_articles)} 篇。开始抓取正文... ===")
+    print(
+        f"\n=== 📥 链接收集完成，共 {len(all_articles)} 篇。开始抓取正文... ==="
+    )
 
-    # 2. 抓取正文并用 AI 概括标题
+    # 2. 抓取正文 + AI 标题
     for idx, item in enumerate(all_articles, start=1):
         print(f"\n🔥 ({idx}/{len(all_articles)}) 处理：{item['title']}")
         fetch_article_content(item)
-
-        # AI 概括标题
         item["ai_title"] = ai_summarize_title(item["content"], item["title"])
         print(f"   🧠 AI 标题：{item['ai_title']}")
 
-    # 3. 统计 + 保存
     success_count = sum(
         1
         for item in all_articles
         if item["content"] and not item["content"].startswith("[获取失败")
     )
-    print(f"\n=== 统计: 正文成功 {success_count} 篇，失败 {len(all_articles) - success_count} 篇 ===")
+    print(
+        f"\n=== 统计：正文成功 {success_count} 篇，失败 {len(all_articles) - success_count} 篇 ==="
+    )
 
-    save_to_csv(all_articles, OUTPUT_FILENAME)
+    # 3. 保存 CSV
+    save_to_csv(all_articles, OUTPUT_CSV)
 
-    return all_articles
+    # 4. 生成 Markdown（标题可点击）
+    md_content = build_markdown(all_articles)
+    print("\n=== Markdown 预览（可用于钉钉 Markdown 消息） ===\n")
+    print(md_content)
+    save_markdown(md_content, OUTPUT_MD)
 
 
 if __name__ == "__main__":
