@@ -3,7 +3,7 @@ name: Daily HR + Fortune China 合并爬虫
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * *"   # 北京时间 09:00（GitHub 用 UTC）
+    - cron: "0 1 * * 1-5"
 
 jobs:
   run:
