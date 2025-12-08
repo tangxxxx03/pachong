@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-财富中文网 商业频道爬虫（PC 版结构）- V8 + AI 标题 & Markdown 版
+财富中文网 商业频道爬虫（PC 版结构）- V8 + 第三方 AI 摘要 & Markdown 版
 
-在 V8「路径拼接终极修正版」基础上新增：
-1. 调用 OpenAI 接口，为每篇文章生成一句客观的中文标题（非标题党）；
-2. 输出 CSV 时增加 ai_title 字段；
-3. 生成 Markdown 文本，每一行形如 `[AI 标题](URL)`，可直接用于钉钉 Markdown 消息，标题可点击查看详情。
+在你原有 V8（路径拼接终极修正版）基础上增加：
+1. 日期改为：默认抓“北京时间的昨天”；也可用环境变量 TARGET_DATE 覆盖（格式 2025-12-07）。
+2. 使用第三方中转接口 http://twob.pp.ua/v1/chat/completions 生成一句话中文摘要。
+3. 输出 CSV：增加 ai_summary 字段。
+4. 生成 Markdown：每条为 [AI 摘要](URL)，可直接用于钉钉 Markdown 消息。
 
-注意：
-- OpenAI Key 不再写死在代码里，而是从环境变量 OPENAI_API_KEY 读取，方便在 GitHub Secrets 里配置；
-- 仍然使用固定 TARGET_DATE（例如 "2025-12-07"），你可以手动修改，或之后再改成自动「昨天」。
+环境变量（推荐用 GitHub Secrets 配置）：
+- OPENAI_API_KEY : 你的第三方令牌（就是你买的 sk-xxxx）
+- AI_API_BASE    : 可选，默认 http://twob.pp.ua/v1
+- TARGET_DATE    : 可选，指定抓取哪一天（YYYY-MM-DD），不设则默认“北京时间昨天”。
 """
 
 import os
@@ -17,30 +19,46 @@ import re
 import time
 import csv
 import json
-from datetime import datetime
-from urllib.parse import urljoin
+from datetime import datetime, timedelta, timezone
 
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
-# --- 配置参数 ---
+# --- 基本配置 ---
 BASE = "https://www.fortunechina.com"
-# 确保列表页 URL 结尾有斜杠，这对 urljoin 处理相对路径非常重要
+# 列表页 URL，务必以 / 结尾，方便 urljoin
 LIST_URL_BASE = "https://www.fortunechina.com/shangye/"
 MAX_PAGES = 3
 MAX_RETRY = 3
+
 OUTPUT_FILENAME = "fortunechina_articles_with_ai_title.csv"
 OUTPUT_MD = "fortunechina_articles_with_ai_title.md"
 
-# 限定日期 (根据你的截图，目标是 2025-12-07)
-# 你可以手动改成想抓的那一天，比如 "2025-12-08"
-TARGET_DATE = "2025-12-07"
-# ----------------
 
-# --- OpenAI 配置（从环境变量读取 Key，适配 GitHub Secrets） ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = "gpt-4.1-mini"  # 你可以按需改成其他模型
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+def get_target_date() -> str:
+    """
+    决定要抓取的目标日期：
+    1. 如果设置了环境变量 TARGET_DATE（例如 "2025-12-07"），优先用它；
+    2. 否则默认抓「北京时间的昨天」，格式 YYYY-MM-DD。
+    """
+    env_date = os.getenv("TARGET_DATE", "").strip()
+    if env_date:
+        return env_date
+
+    tz_cn = timezone(timedelta(hours=8))
+    yesterday_cn = (datetime.now(tz_cn) - timedelta(days=1)).strftime("%Y-%m-%d")
+    return yesterday_cn
+
+
+TARGET_DATE = get_target_date()
+
+# --- 第三方 AI 配置（twob.pp.ua） ---
+AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+AI_API_BASE = os.getenv("AI_API_BASE", "http://twob.pp.ua/v1").rstrip("/")
+AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
+AI_MODEL = "[次]gemini-2.5-pro"  # 按你平台提供的默认模型名
+
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -55,70 +73,66 @@ DEFAULT_HEADERS = {
 }
 
 
-# === AI 标题生成 ===
-def ai_summarize_title(content: str, fallback_title: str) -> str:
+# ================== AI 摘要函数 ==================
+def get_ai_summary(content: str, fallback_title: str = "") -> str:
     """
-    调用 OpenAI，把正文内容概括成一句「内部用标题」：
-    - 中文
-    - 非标题党，客观准确
-    - 不超过 25 个字
-    如果无法调用，则返回 fallback_title（原始标题）
+    使用第三方 twob.pp.ua 平台生成一句话摘要。
+    - content: 文章正文
+    - fallback_title: 若 AI 调用失败则退回的标题（可以传原始标题）
     """
-    if not OPENAI_API_KEY:
-        print("  ⚠️ 未配置 OPENAI_API_KEY，使用原始标题。")
-        return fallback_title
+    if not content or len(content) < 30:
+        return fallback_title or "内容过短，无需摘要"
 
-    if not content or content.startswith("[获取失败"):
-        return fallback_title
-
-    snippet = content[:2000]
-
-    prompt = (
-        "你是一名严谨的中文新闻编辑，请根据下面的新闻正文，"
-        "写出一句不超过 25 个字的中文新闻标题，用于公司内部阅读：\n"
-        "要求：客观准确、非标题党、不要加引号，只输出标题本身。\n\n"
-        f"{snippet}"
-    )
+    if not AI_API_KEY:
+        print("  ⚠️ 未配置 OPENAI_API_KEY（第三方令牌），跳过 AI 摘要。")
+        return fallback_title or "（未配置 AI 摘要）"
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        "model": OPENAI_MODEL,
+        "model": AI_MODEL,
         "messages": [
             {
                 "role": "system",
-                "content": "你是一名严谨的中文新闻编辑，只输出新闻标题文本。",
+                "content": "你是一个严谨的中文新闻编辑，请将新闻正文提炼成一句中文摘要，"
+                           "要求：客观、不夸张、不标题党，长度控制在 25 个字以内。",
             },
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": content[:2000],
+            },
         ],
+        "max_tokens": 120,
         "temperature": 0.3,
-        "max_tokens": 64,
     }
 
+    print(f"  🤖 正在调用 AI（{AI_CHAT_URL}）生成摘要...")
+
     try:
-        resp = requests.post(
-            OPENAI_API_URL, headers=headers, data=json.dumps(payload), timeout=30
-        )
+        resp = requests.post(AI_CHAT_URL, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        ai_title = data["choices"][0]["message"]["content"].strip()
-        # 只取第一行，防止模型顺带解释
-        ai_title = ai_title.splitlines()[0].strip()
-        if not ai_title:
-            return fallback_title
-        print(f"  🧠 AI 标题：{ai_title}")
-        return ai_title
+
+        # 兼容 OpenAI 风格响应
+        summary = data["choices"][0]["message"]["content"].strip()
+        summary = summary.splitlines()[0].strip()  # 只取第一行
+        print(f"  ✨ AI 摘要：{summary}")
+        return summary or (fallback_title or "（AI 摘要为空）")
+
     except Exception as e:
-        print(f"  ⚠️ AI 调用失败，使用原始标题。错误: {e}")
-        return fallback_title
+        print(f"  ⚠️ AI 调用失败：{e}")
+        return fallback_title or f"[AI 调用失败: {e}]"
 
 
-def fetch_list(page=1):
+# ================== 列表抓取 ==================
+def fetch_list(page: int = 1):
     """
     抓取指定页码的文章列表，使用正确的相对路径拼接。
+    保留你原来 V8 版本的解析逻辑。
     """
     # 构造当前列表页的完整 URL
     if page == 1:
@@ -138,6 +152,7 @@ def fetch_list(page=1):
     soup = BeautifulSoup(r.text, "html.parser")
     items = []
 
+    # 这里使用你之前验证过能用的选择器
     for li in soup.select("ul.news-list li.news-item"):
         h2 = li.find("h2")
         a = li.find("a", href=True)
@@ -159,8 +174,6 @@ def fetch_list(page=1):
             continue
 
         # 3. 【核心修正】使用 current_list_url 进行拼接
-        # 如果 href 是 "c/2025..."，list_url 是 ".../shangye/"
-        # 结果自动变为 ".../shangye/c/2025..."
         url_full = urljoin(current_list_url, href)
 
         items.append(
@@ -169,7 +182,7 @@ def fetch_list(page=1):
                 "url": url_full,
                 "date": pub_date,
                 "content": "",
-                "ai_title": "",
+                "ai_summary": "",
             }
         )
 
@@ -177,7 +190,8 @@ def fetch_list(page=1):
     return items
 
 
-def fetch_article_content(item):
+# ================== 正文抓取 ==================
+def fetch_article_content(item: dict):
     """
     请求文章正文内容
     """
@@ -222,11 +236,12 @@ def fetch_article_content(item):
                 item["content"] = f"[获取失败: {e}]"
 
 
+# ================== CSV 保存 ==================
 def save_to_csv(data: list, filename: str):
     if not data:
         print("💡 没有数据可保存。")
         return
-    fieldnames = ["title", "ai_title", "date", "url", "content"]
+    fieldnames = ["title", "ai_summary", "date", "url", "content"]
     try:
         with open(filename, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -237,20 +252,23 @@ def save_to_csv(data: list, filename: str):
         print(f"\n❌ CSV 保存失败：{e}")
 
 
-# === 生成 Markdown，可用于钉钉 Markdown 消息 ===
+# ================== 生成 Markdown ==================
 def build_markdown(items: list) -> str:
     """
     生成一个 Markdown 字符串：
     - 顶部是标题
-    - 每一行都是：1. [AI 标题](URL)
+    - 每一行都是：1. [AI 摘要](URL)
     """
     if not items:
         return f"### 财富中文网·商业频道精选（{TARGET_DATE}）\n\n今日未抓到符合条件的新闻。"
 
-    lines = [f"### 财富中文网·商业频道精选（{TARGET_DATE}）", ""]
+    lines = [
+        f"### 财富中文网·商业频道精选（{TARGET_DATE}）",
+        "",
+    ]
 
     for idx, item in enumerate(items, start=1):
-        title = item.get("ai_title") or item.get("title") or "（无标题）"
+        title = item.get("ai_summary") or item.get("title") or "（无标题）"
         url = item.get("url", "")
         lines.append(f"{idx}. [{title}]({url})")
 
@@ -266,16 +284,16 @@ def save_markdown(content: str, filename: str):
         print(f"\n❌ Markdown 文件保存失败：{e}")
 
 
+# ================== 主流程 ==================
 def main():
     all_articles = []
     print(f"=== 🚀 爬虫启动 (目标日期: {TARGET_DATE}) ===")
-    print(f"=== 🛠️ 修复策略: 基于列表页 URL ({LIST_URL_BASE}) 进行相对路径拼接 ===")
+    print(f"=== 🛠️ 路径策略: 基于列表页 URL ({LIST_URL_BASE}) 进行相对路径拼接 ===")
 
     # 1. 抓取列表
     for page in range(1, MAX_PAGES + 1):
         list_items = fetch_list(page)
         if not list_items:
-            # 如果第一页就没数据，可能是日期不对，或者没加载出来
             if page == 1:
                 print(
                     f"⚠️ 第 1 页未找到 {TARGET_DATE} 的文章，请确认网站上确实有该日期的内容。"
@@ -284,15 +302,17 @@ def main():
         all_articles.extend(list_items)
         time.sleep(1)
 
-    print(f"\n=== 📥 链接收集完成，共 {len(all_articles)} 篇。开始抓取正文 + 生成 AI 标题... ===")
+    print(
+        f"\n=== 📥 链接收集完成，共 {len(all_articles)} 篇。开始抓取正文 + 生成 AI 摘要... ==="
+    )
 
-    # 2. 抓取正文 + 生成 AI 标题
+    # 2. 抓取正文 + AI 摘要
     count = 0
     for item in all_articles:
         count += 1
         print(f"\n🔥 ({count}/{len(all_articles)}) 处理: {item['title']}")
         fetch_article_content(item)
-        item["ai_title"] = ai_summarize_title(item["content"], item["title"])
+        item["ai_summary"] = get_ai_summary(item["content"], item["title"])
 
     # 3. 统计与保存 CSV
     success_count = sum(
