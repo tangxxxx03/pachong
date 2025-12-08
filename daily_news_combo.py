@@ -790,15 +790,15 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
 
     if not merged_items:
         return (
-            f"日期：{today_str}（{weekday_str}）  \n"
-            f"标题：**人资日报｜每日要点**\n"
+            f"**日期：{today_str}（{weekday_str}）**  \n"
+            f"**标题：人资日报｜每日要点**\n"
             "今日未抓取到有效资讯。"
         )
 
-    # 题头：日期行尾两个空格，强制换行；标题加粗
+    # 题头：日期/标题整行加粗；日期行尾两个空格强制换行
     lines = [
-        f"日期：{today_str}（{weekday_str}）  ",
-        "标题：**人资日报｜每日要点**",
+        f"**日期：{today_str}（{weekday_str}）**  ",
+        "**标题：人资日报｜每日要点**",
         ""
     ]
 
