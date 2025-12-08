@@ -65,7 +65,7 @@ TARGET_DATE = get_target_date()
 # ================== AI 接口配置 ==================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL = "gpt-4.1-mini"  # 如果你换成别的模型，改这里
+OPENAI_MODEL = "gpt-4.1-mini"  # 或你自己的模型名
 
 
 # ================== HTTP 头 ==================
@@ -106,7 +106,7 @@ def fetch_list(page: int):
 
     items = []
 
-    # 根据页面结构选择器提取列表
+    # 根据页面结构选择器提取列表（可能需要根据实际页面微调）
     for box in soup.select("div.list-mod li, div.mod-list li, div.list-item"):
         h2 = box.find("h2") or box.find("h3")
         a = h2.find("a") if h2 else box.find("a")
