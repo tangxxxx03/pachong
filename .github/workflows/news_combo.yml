@@ -11,20 +11,21 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # （可选）Cloudflare AI Gateway，没用可以留空或删掉
-      CF_GATEWAY_URL: ${{ secrets.CF_GATEWAY_URL }}
-      CF_AIG_TOKEN:   ${{ secrets.CF_AIG_TOKEN }}
-
-      # —— 硅基流动 / OpenAI 兼容 API —— 
+      # —— AI —— 
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       AI_API_BASE: "https://api.siliconflow.cn/v1"
       AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
 
-      # —— 钉钉推送：你之前用的商业频道机器人 —— 
-      DINGTALK_BASES:   ${{ secrets.DINGDINGSHANGYEWEBHOOK }}
-      DINGTALK_SECRETS: ${{ secrets.DINGDINGSHANGYESECRET }}
+      # —— 钉钉推送：两个群聊机器人（用英文逗号隔开）——
+      DINGTALK_BASES: >
+        ${{ secrets.DINGDINGSHANGYEWEBHOOK }},
+        ${{ secrets.dingdingxiaoqunwebhook }}
 
-      # （可选）如果你的合并脚本里用到了 HR_TARGET_DATE / TARGET_DATE，可以在这里指定
+      DINGTALK_SECRETS: >
+        ${{ secrets.DINGDINGSHANGYESECRET }},
+        ${{ secrets.dingdingxiaoqunsecret }}
+
+      # —— 可选日期控制 —— 
       HR_TARGET_DATE: ""
       TARGET_DATE: ""
 
@@ -39,10 +40,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 如果你在 requirements.txt 里已经写好了依赖（推荐）
           pip install -r requirements.txt
-          # 如果没有 requirements.txt，也可以改成：
-          # pip install requests beautifulsoup4
 
       - name: Run Combined Crawler (HR + FortuneChina)
         run: |
