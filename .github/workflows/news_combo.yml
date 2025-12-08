@@ -19,11 +19,11 @@ jobs:
       # —— 钉钉推送：两个群聊机器人（用英文逗号隔开）——
       DINGTALK_BASES: >
         ${{ secrets.DINGDINGSHANGYEWEBHOOK }},
-        ${{ secrets.dingdingxiaoqunwebhook }}
+        ${{ secrets.DINGDINGXIAOQUNWEBHOOK }}
 
       DINGTALK_SECRETS: >
         ${{ secrets.DINGDINGSHANGYESECRET }},
-        ${{ secrets.dingdingxiaoqunsecret }}
+        ${{ secrets.DINGDINGXIAOQUNSECRET }}
 
       # —— 可选日期控制 —— 
       HR_TARGET_DATE: ""
