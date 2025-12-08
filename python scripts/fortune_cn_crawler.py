@@ -32,7 +32,7 @@ from bs4 import BeautifulSoup
 
 BASE = "https://www.fortunechina.com"
 LIST_URL_BASE = "https://www.fortunechina.com/shangye/"
-MAX_PAGES = 3
+MAX_PAGES = 1
 MAX_RETRY = 3
 
 OUTPUT_CSV = "fortunechina_articles_with_ai_title.csv"
