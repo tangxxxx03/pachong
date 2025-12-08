@@ -1,6 +1,9 @@
 name: Fortune China 商业频道爬虫 Demo
 
-
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 1 * * *"   # 北京时间 09:00（GitHub 用 UTC）
 
 jobs:
   run:
