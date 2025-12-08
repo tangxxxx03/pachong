@@ -792,45 +792,59 @@ def send_dingtalk_markdown(title: str, text: str):
         print(f"  ⚠️ 单机器人钉钉发送失败：{e}")
 
 
-# ===================== 四、合并 Markdown：人资 + 商业 =====================
+# ===================== 四、合并 Markdown：统一编号 + 标题可点击 =====================
 
-def build_combined_markdown(hr_items: list, fc_items: list) -> str:
+def build_clean_markdown(hr_items: list, fc_items: list) -> str:
     """
-    把三茅日报 + 财富商业频道 合并为一条 Markdown 文本，用于钉钉推送。
-    - 三茅部分：每一条前面加上“符号 + 标签”，例如：- 【人资】xxx
-    - 财富部分：序号 + 【商业】[AI 摘要](链接)
+    把三茅日报 + 财富商业频道 合并为一条 Markdown 文本：
+    - 不再区分来源；
+    - 所有条目统一 1、2、3... 编号；
+    - 每条写成：[标题](URL)；  （点击标题即可跳转）；
     """
     now_cn = now_tz()
     today_str = now_cn.strftime("%Y-%m-%d")
     weekday_str = zh_weekday(now_cn)
 
-    lines = [
-        f"### 人资 & 商业资讯日报（{today_str}，{weekday_str}）",
-        "",
-    ]
+    merged_items = []
 
-    # --- 一、人力资源 · 三茅日报 ---
-    lines.append("#### 一、人力资源 · 三茅日报要点")
+    # 先放三茅 titles（同一篇文章，链接相同没问题）
     if hr_items and hr_items[0].get("titles"):
         it = hr_items[0]
+        detail_url = it.get("url", "")
         for t in it["titles"]:
-            # 加上“符号”和标签【人资】
-            lines.append(f"- 【人资】{t}")
-        lines.append("")
-        lines.append(f"[查看“三茅日报”原文]({it['url']})")
-    else:
-        lines.append("> 今日未找到“三茅日报”或未命中目标日期。")
+            title = t.strip()
+            if not title:
+                continue
+            merged_items.append({
+                "title": title,
+                "url": detail_url or "#"
+            })
 
-    lines.append("")
-    # --- 二、商业资讯 · 财富中文网 ---
-    lines.append(f"#### 二、商业资讯 · 财富中文网精选（{FC_TARGET_DATE}）")
-    if fc_items:
-        for idx, item in enumerate(fc_items, start=1):
-            title = item.get("ai_summary") or item.get("title") or "（无标题）"
-            url = item.get("url", "")
-            lines.append(f"{idx}. 【商业】[{title}]({url})")
-    else:
-        lines.append("> 今日未抓到符合条件的财富中文网·商业频道文章。")
+    # 再放财富新闻（使用 AI 摘要作为标题优先）
+    for art in fc_items or []:
+        title = (art.get("ai_summary") or art.get("title") or "").strip()
+        if not title:
+            continue
+        merged_items.append({
+            "title": title,
+            "url": art.get("url", "#")
+        })
+
+    # 如果今天啥也没抓到
+    if not merged_items:
+        return f"日期：{today_str}（{weekday_str}）\n今日未抓取到有效资讯。"
+
+    lines = [
+        f"日期：{today_str}（{weekday_str}）",
+        "每日资讯要点",
+        ""
+    ]
+
+    for idx, item in enumerate(merged_items, start=1):
+        title = item["title"]
+        url = item["url"]
+        # 每条：编号 + 可点击标题 + 中文分号
+        lines.append(f"{idx}. [{title}]({url})；")
 
     return "\n".join(lines)
 
@@ -850,9 +864,9 @@ def main():
     print("\n>>> [步骤2] 抓取财富中文网 · 商业频道 + AI 摘要")
     fc_articles = run_fortune_crawler()
 
-    # 3. 合并 Markdown
-    print("\n>>> [步骤3] 生成合并 Markdown 消息")
-    combined_md = build_combined_markdown(hr_results, fc_articles)
+    # 3. 合并 Markdown（新的统一编号 + 可点击标题样式）
+    print("\n>>> [步骤3] 生成合并 Markdown 消息（统一编号 + 标题可点击）")
+    combined_md = build_clean_markdown(hr_results, fc_articles)
     print("\n===== 合并 Markdown 预览 =====\n")
     print(combined_md)
 
