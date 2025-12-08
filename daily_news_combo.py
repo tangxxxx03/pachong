@@ -796,11 +796,12 @@ def build_clean_markdown(hr_items: list, fc_items: list) -> str:
         )
 
     # 题头：在“日期”行尾加两个空格，强制换行
-    lines = [
-        f"日期：{today_str}（{weekday_str}）  ",
-        "标题：人资日报｜每日要点",
-        ""
-    ]
+lines = [
+    f"日期：{today_str}（{weekday_str}）  ",
+    f"**标题：人资日报｜每日要点**",
+    ""
+]
+
 
     # 列表：最后一条句号，其余分号
     for idx, item in enumerate(merged_items, start=1):
