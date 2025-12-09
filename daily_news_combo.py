@@ -17,7 +17,7 @@
 - TARGET_DATE             ：财富中文网目标日期（YYYY-MM-DD，不填则默认“北京时间昨天”）
 - OPENAI_API_KEY          ：SiliconFlow / OpenAI 兼容 Key（形如 sk-xxx）
 - AI_API_BASE             ：SiliconFlow Base URL（默认 https://api.siliconflow.cn/v1）
-- AI_MODEL                ：模型名（默认 Qwen/Qwen2.5-7B-Instruct）
+- AI_MODEL                ：模型名（默认 Qwen/Qwen2.5-14B-Instruct）
 
 - DINGTALK_BASES          ：钉钉 webhook 基础 URL，多个用逗号分隔（含 access_token）
 - DINGTALK_SECRETS        ：对应的 secret，多个用逗号分隔
@@ -437,10 +437,50 @@ FC_DEFAULT_HEADERS = {
 AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
 AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
-AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+# —— 默认升级为 14B，更稳 —— 
+AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-14B-Instruct")
+
+
+def _need_fallback(summary: str, title: str, content: str) -> bool:
+    """
+    简单的安全检查：
+    1）摘要太短 / 太长；
+    2）标题里有数字，但摘要里一个都没保留；
+    3）摘要出现高风险词，但原文 + 标题中都不存在。
+    满足任一条件时，建议退回原标题。
+    """
+    if not summary:
+        return True
+
+    s = summary.strip()
+    if len(s) < 6 or len(s) > 40:
+        return True
+
+    title = title or ""
+    content = content or ""
+
+    # 数字保护：标题里有数字，摘要里必须至少保留一个
+    nums_title = re.findall(r"\d+", title)
+    if nums_title:
+        if not any(n in s for n in nums_title):
+            return True
+
+    risky_words = ["竞争对手", "对手", "首次", "史上", "重磅", "爆款"]
+    snippet = (content[:500] or "") + title
+    for w in risky_words:
+        if w in s and w not in snippet:
+            return True
+
+    return False
 
 
 def get_ai_summary(content: str, fallback_title: str = "") -> str:
+    """
+    使用 SiliconFlow 生成一句话摘要。
+    增强版：
+    - 强约束 prompt：禁止脑补、禁止虚构关系；
+    - 事后安全检测：不合格就退回原标题。
+    """
     if not content or len(content) < 30:
         return fallback_title or "内容过短，无需摘要"
 
@@ -454,23 +494,37 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         "Content-Type": "application/json",
     }
 
+    # —— 零脑补 Prompt —— 
+    system_prompt = (
+        "你是一个严谨的中文新闻编辑，请根据给定的新闻正文，生成【一句话】中文摘要。\n"
+        "必须严格遵守：\n"
+        "1. 摘要必须完全基于原文事实，不允许添加原文中没有的信息；\n"
+        "2. 不得推断公司之间的关系（如竞争对手、盟友等），除非原文明确说明；\n"
+        "3. 不得推断“首次、史上、里程碑、重磅、爆款”等评价性结论；\n"
+        "4. 不要加入主观评价，不使用夸张或营销化措辞；\n"
+        "5. 尽量保留关键数字、时间、主体名称；\n"
+        "6. 长度控制在 25 个汉字以内，保持客观、中性、简洁。"
+    )
+
+    user_content = (
+        "请在不脑补、不新增信息的前提下，为下面这篇新闻写一句话摘要：\n\n"
+        f"{content[:2000]}"
+    )
+
     payload = {
         "model": AI_MODEL,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "你是一个严谨的中文新闻编辑，请将新闻正文提炼成一句中文摘要，"
-                    "要求：客观、务实、不标题党，长度控制在 25 个字以内。"
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": content[:2000],
+                "content": user_content,
             },
         ],
         "max_tokens": 120,
-        "temperature": 0.3,
+        "temperature": 0.2,
     }
 
     print(f"  🤖 正在调用 AI（{AI_CHAT_URL}，模型={AI_MODEL}）生成摘要...")
@@ -489,7 +543,14 @@ def get_ai_summary(content: str, fallback_title: str = "") -> str:
         data = resp.json()
         summary = data["choices"][0]["message"]["content"].strip()
         summary = summary.splitlines()[0].strip()
-        print(f"  ✨ AI 摘要：{summary}")
+        print(f"  ✨ 原始 AI 摘要：{summary}")
+
+        # —— 安全检测，不合格就用原标题兜底 —— 
+        if _need_fallback(summary, fallback_title or "", content):
+            print("  ⚠️ 摘要通过安全检查失败，改用原标题兜底。")
+            return fallback_title or summary or "（AI 摘要不可靠，已回退）"
+
+        print(f"  ✅ 通过安全检查的摘要：{summary}")
         return summary or (fallback_title or "（AI 摘要为空）")
 
     except Exception as e:
