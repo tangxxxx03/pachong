@@ -18,11 +18,11 @@ jobs:
 
       # —— 钉钉推送：两个群聊机器人（用英文逗号隔开）——
       DINGTALK_BASES: >
-        ${{ secrets.DINGDINGSHANGYEWEBHOOK }},
-        ${{ secrets.DINGDINGXIAOQUNWEBHOOK }}
+        ${{ secrets.DINGDINGSHANGYEWE }},
+        ${{ secrets.DINGDINGXIAOQUNWEHOOK }}
 
       DINGTALK_SECRETS: >
-        ${{ secrets.DINGDINGSHANGYESECRET }},
+        ${{ secrets.DINGDINGSHANGYE }},
         ${{ secrets.DINGDINGXIAOQUNSECRET }}
 
       # —— 可选日期控制 —— 
