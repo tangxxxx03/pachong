@@ -48,5 +48,5 @@ jobs:
 
       - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          echo "执行 hr-news-huabei.py"
-          python "hr-news-huabei.py"
+          echo "执行 hr_news_crawler.py"
+          python "hr_news_crawler.py"
