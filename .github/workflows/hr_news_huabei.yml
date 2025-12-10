@@ -10,15 +10,21 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
+    # 设置时区为上海，确保 date/datetime 相关逻辑与国内一致
+    environment: production
+    
     env:
-      # ---- 你的钉钉机器人（必填）----
-      DINGTALK_BASE: "https://oapi.dingtalk.com/robot/send?access_token=9748e4a3fada767f92b94795452f7d4f48d3b690a66d2f3da90a5dc636092918"
+      # 强制 Python 实时输出日志，不缓存，这样能看到具体的报错信息
+      PYTHONUNBUFFERED: "1"
+      TZ: "Asia/Shanghai"
+      
+      # ---- 你的钉钉机器人 ----
+      # ⚠️ 警告：原来的 Token 已泄露，请在钉钉群重新生成一个并填入下方，或者使用 GitHub Secrets
+      DINGTALK_BASE: "https://oapi.dingtalk.com/robot/send?access_token=9748e4a3fada767f92b94795452f7d4f48d3b690a66d2f3da90a5dc636092918N"
       DINGTALK_SECRET: "SEC529f73787a4d78ee297d66d4205b2514038b21fe0c596957c639eb2eb0adebc5"
+      
       # ---- 可选：支持多源 ----
       SRC_HRLOO_URLS: "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
-      # ---- 可选：固定抓取某一天 ----
-      # HR_TARGET_DATE: "2025-01-15"
-      # --------------------------------
 
     steps:
       - name: Checkout repo
@@ -31,10 +37,20 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4 requests urllib3 backports.zoneinfo --quiet
-          pip install -r requirements.txt --quiet || true
+          echo "升级 pip..."
+          python -m pip install --upgrade pip
+          
+          echo "安装核心依赖..."
+          # 增加了 lxml，很多爬虫脚本依赖它作为解析器
+          pip install beautifulsoup4 requests urllib3 backports.zoneinfo lxml
+          
+          echo "安装 requirements.txt (如果存在)..."
+          # 去掉了 || true，如果 requirements 安装失败，必须报错停止，不能强行运行
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run hr_news_crawler.py
         run: |
-          echo "== 开始执行 hr_news_crawler.py =="
+          echo "== 当前系统时间 (北京时间) =="
+          date
+          echo "== 开始执行脚本 =="
           python hr_news_crawler.py
