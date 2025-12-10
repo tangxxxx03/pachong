@@ -1,42 +1,59 @@
 name: Daily HR + Fortune China 合并爬虫
 
+# 触发机制：
+# 1. workflow_dispatch: 允许手动点击按钮运行（方便测试）
+# 2. schedule: 定时运行（UTC时间 1:00 = 北京时间 9:00）
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"   # 周一到周五，北京时间 09:00（GitHub 用 UTC）
+    - cron: "0 1 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # 环境变量配置
     env:
-      # —— AI —— 
+      # ——— 关键：硅基流动 AI 配置 ———
+      # 这里使用 OPENAI_API_KEY 变量名，但填入的是硅基流动的 Key
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # 硅基流动的 API 地址
       AI_API_BASE: "https://api.siliconflow.cn/v1"
+      # 您选择的模型
       AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
 
-      # —— 钉钉推送：单个群聊机器人 —— 
+      # ——— 钉钉配置 (从您的 Secrets 读取) ———
       DINGTALK_BASES:   ${{ secrets.SHIYANQUNWEBHOOK }}
       DINGTALK_SECRETS: ${{ secrets.SHIYANQUNSECRET }}
 
-      # —— 可选日期控制（为空则按默认：三茅=当天，财富=昨天） —— 
+      # ——— 爬虫参数 ———
+      FORTUNE_MAX_ITEMS: 5
+      # 留空则默认：三茅抓今天，财富抓列表页时间
       HR_TARGET_DATE: ""
       TARGET_DATE: ""
 
     steps:
+      # 1. 拉取代码
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 2. 设置 Python 环境
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3. 安装依赖 (最关键的一步！)
+      # 即使您用的是硅基流动，也必须安装 'openai' 库，因为它是通用的连接工具
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 openai
 
-      - name: Run Combined Crawler (HR + FortuneChina)
+      # 4. 运行爬虫脚本
+      # ⚠️ 注意：请确保下面的文件名与您仓库里实际上传的 Python 文件名完全一致！
+      # 如果您的文件叫 main.py，请改成 python main.py
+      - name: Run Combined Crawler
         run: |
           python daily_news_combo.py
