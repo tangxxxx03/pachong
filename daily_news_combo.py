@@ -1,418 +1,213 @@
 # -*- coding: utf-8 -*-
+"""
+财富中文网 · 商业新闻爬虫 + AI 摘要 + 钉钉推送
+支持：
+- Fortune China 商业频道抓取
+- AI 摘要（SiliconFlow / OpenAI 兼容 API）
+- 安全检查（防脑补、保数字、去标题党）
+- 钉钉多机器人推送（加签）
+"""
 
-import os, re, time, hmac, ssl, base64, hashlib, urllib.parse, requests
-from bs4 import BeautifulSoup, Tag
-from urllib.parse import urljoin
-from datetime import datetime, date
-from urllib3.util.retry import Retry
+import os, re, time, hmac, hashlib, base64, json
+import requests
+from urllib.parse import urljoin, quote_plus
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+
+# 禁用代理避免 407
+for _k in ("http_proxy","https_proxy","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","all_proxy"):
+    os.environ.pop(_k, None)
+
+# 会话重试
 from requests.adapters import HTTPAdapter
-
-try:
-    from zoneinfo import ZoneInfo
-except:
-    from backports.zoneinfo import ZoneInfo
-
-
-def _tz(): return ZoneInfo("Asia/Shanghai")
-def now_tz(): return datetime.now(_tz())
-def norm(s): return re.sub(r"\s+", " ", (s or "").strip())
-def zh_weekday(dt): return ["周一","周二","周三","周四","周五","周六","周日"][dt.weekday()]
+from urllib3.util.retry import Retry
+_SESSION = requests.Session()
+_SESSION.mount("http://", HTTPAdapter(max_retries=Retry(total=3)))
+_SESSION.mount("https://", HTTPAdapter(max_retries=Retry(total=3)))
 
 
-# ------------------ DingTalk Tool ------------------
+# ============================
+#        日期配置
+# ============================
+def get_target_date() -> str:
+    """从环境变量读取日期，否则默认取北京时间昨天"""
+    target_date = os.getenv("TARGET_DATE", "").strip()
+    if target_date:
+        return target_date
 
-def _sign_webhook(base, secret):
-    if not base:
-        return ""
-    if not secret:
-        return base
-
-    ts = str(round(time.time() * 1000))
-    msg = f"{ts}\n{secret}".encode("utf-8")
-    sign = urllib.parse.quote_plus(
-        base64.b64encode(hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).digest())
-    )
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}timestamp={ts}&sign={sign}"
+    today = datetime.utcnow() + timedelta(hours=8)
+    yday = today - timedelta(days=1)
+    return yday.strftime("%Y-%m-%d")
 
 
-def send_dingtalk_markdown(title, md):
-    base = os.getenv("DINGTALK_BASE") or os.getenv("DINGTALK_BASEA")
-    secret = os.getenv("DINGTALK_SECRET") or os.getenv("DINGTALK_SECRETA")
-
-    if not base:
-        print("🔕 未配置 DINGTALK_BASE，跳过推送。")
-        return False
-
-    try:
-        url = _sign_webhook(base, secret)
-        r = requests.post(
-            url,
-            json={"msgtype": "markdown", "markdown": {"title": title, "text": md}},
-            timeout=20
-        )
-        ok = (r.status_code == 200 and r.json().get("errcode") == 0)
-        print("DingTalk push=", ok, " code=", r.status_code)
-        if not ok:
-            print("resp:", r.text[:300])
-        return ok
-    except Exception as e:
-        print("DingTalk error:", e)
-        return False
+# ============================
+#   AI 生成摘要（SiliconFlow）
+# ============================
+AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
+AI_CHAT_URL = f"{AI_API_BASE}/chat/completions"
+AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-14B-Instruct")
 
 
-# ------------------ Network Session ------------------
-
-class LegacyTLSAdapter(HTTPAdapter):
-    def init_poolmanager(self, *a, **kw):
-        ctx = ssl.create_default_context()
-        if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
-            ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
-        kw["ssl_context"] = ctx
-        return super().init_poolmanager(*a, **kw)
-
-
-def make_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/120 Safari/537.36",
-        "Accept-Language": "zh-CN,zh;q=0.9"
-    })
-    r = Retry(total=3, backoff_factor=0.6, status_forcelist=[500, 502, 503, 504])
-    s.mount("https://", LegacyTLSAdapter(max_retries=r))
-    return s
-
-
-# ------------------ Text Helpers ------------------
-
-CN_TITLE_DATE = re.compile(r"[（(]\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*[)）]")
-
-
-def date_from_bracket_title(text: str):
-    m = CN_TITLE_DATE.search(text or "")
-    if not m:
-        return None
-    try:
-        y, mo, d = int(m[1]), int(m[2]), int(m[3])
-        return date(y, mo, d)
-    except:
-        return None
-
-
-def looks_like_numbered(text: str) -> bool:
-    return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
-
-
-CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
-
-
-def strip_leading_num(t: str) -> str:
-    t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
-    t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
-    t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
-    return t.strip()
-
-
-# ------------------ Main Crawler ------------------
-
-class HRLooCrawler:
-    def __init__(self):
-        self.session = make_session()
-        self.results = []
-        self.max_items = 1
-
-        t = (os.getenv("HR_TARGET_DATE") or "").strip()
-        if t:
-            try:
-                y, m, d = map(int, re.split(r"[-/\.]", t))
-                self.target_date = date(y, m, d)
-            except:
-                print("⚠️ HR_TARGET_DATE 解析失败，使用今日。")
-                self.target_date = now_tz().date()
-        else:
-            self.target_date = now_tz().date()
-
-        self.daily_title_pat = re.compile(r"三茅日[报報]")
-        self.sources = [
-            u.strip()
-            for u in os.getenv("SRC_HRLOO_URLS", "https://www.hrloo.com/,https://www.hrloo.com/news/hr").split(",")
-            if u.strip()
-        ]
-
-        print(f"[CFG] target_date={self.target_date} {zh_weekday(now_tz())} sources={self.sources}")
-
-    # ------------------ Entry ------------------
-
-    def crawl(self):
-        for base in self.sources:
-            if self._crawl_source(base):
-                break
-
-    # ------------------ List page ------------------
-
-    def _crawl_source(self, base):
-        try:
-            r = self.session.get(base, timeout=20)
-        except Exception as e:
-            print("首页请求异常：", base, e)
-            return False
-
-        if r.status_code != 200:
-            print("首页请求失败：", base, r.status_code)
-            return False
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # Primary container
-        items = soup.select("div.dwxfd-list-items div.dwxfd-list-content-left")
-        if items:
-            for div in items:
-                dts = (div.get("dwdata-time") or "").strip()
-                if dts:
-                    try:
-                        pub_d = datetime.strptime(dts.split()[0], "%Y-%m-%d").date()
-                        if pub_d != self.target_date:
-                            continue
-                    except:
-                        pass
-
-                a = div.find("a", href=True)
-                if not a:
-                    continue
-
-                title_text = norm(a.get_text())
-                if not self.daily_title_pat.search(title_text):
-                    continue
-
-                t2 = date_from_bracket_title(title_text)
-                if t2 and t2 != self.target_date:
-                    continue
-
-                abs_url = urljoin(base, a["href"])
-                if self._try_detail(abs_url):
-                    return True
-
-            print("[MISS] 容器通道未命中：", base)
-
-        # Fallback scanning
-        links = []
-        for a in soup.select("a[href*='/news/']"):
-            href = a.get("href", "")
-            if not re.search(r"/news/\d+\.html$", href):
-                continue
-
-            text = norm(a.get_text())
-            if not self.daily_title_pat.search(text):
-                continue
-
-            t2 = date_from_bracket_title(text)
-            if t2 and t2 != self.target_date:
-                continue
-
-            links.append(urljoin(base, href))
-
-        seen = set()
-        for url in links:
-            if url in seen:
-                continue
-            seen.add(url)
-            if self._try_detail(url):
-                return True
-
-        print("[MISS] 本源未命中目标日期：", base)
-        return False
-
-    # ------------------ Detail page ------------------
-
-    def _try_detail(self, abs_url):
-        pub_dt, titles, page_title = self._fetch_detail_clean(abs_url)
-
-        if not page_title or not self.daily_title_pat.search(page_title):
-            return False
-
-        t3 = date_from_bracket_title(page_title)
-        if t3 and t3 != self.target_date:
-            return False
-
-        if pub_dt and pub_dt.date() != self.target_date and not t3:
-            return False
-
-        if not titles:
-            return False
-
-        self.results.append({
-            "title": page_title,
-            "url": abs_url,
-            "date": (pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else f"{self.target_date} 09:00"),
-            "titles": titles
-        })
-
-        print(f"[HIT] {abs_url} -> {len(titles)} 条")
+def _need_fallback(summary: str, title: str, content: str) -> bool:
+    if not summary:
         return True
 
-    def _extract_pub_time(self, soup: BeautifulSoup):
-        cand = []
+    s = summary.strip()
+    if len(s) < 6 or len(s) > 40:
+        return True
 
-        for t in soup.select("time[datetime]"):
-            cand.append(t.get("datetime", ""))
+    nums_title = re.findall(r"\d+", title or "")
+    if nums_title:
+        if not any(n in s for n in nums_title):
+            return True
 
-        for m in soup.select(
-            "meta[property='article:published_time'],meta[name='pubdate'],meta[name='publishdate']"
-        ):
-            cand.append(m.get("content", ""))
+    risky_words = ["竞争对手", "对手", "首次", "史上", "爆款", "重磅"]
+    snippet = (content[:500] or "") + (title or "")
 
-        for sel in [".time", ".date", ".pubtime", ".publish-time", ".post-time", ".info", "meta[itemprop='datePublished']"]:
-            for x in soup.select(sel):
-                if isinstance(x, Tag):
-                    cand.append(x.get_text(" ", strip=True))
+    for w in risky_words:
+        if w in s and w not in snippet:
+            return True
 
-        pat = re.compile(r"(20\d{2})[./\-年](\d{1,2})[./\-月](\d{1,2})(?:\D+(\d{1,2}):(\d{1,2}))?")
+    return False
 
-        def parse_one(s):
-            m = pat.search(s or "")
-            if not m:
-                return None
-            try:
-                y, mo, d = int(m[1]), int(m[2]), int(m[3])
-                hh = int(m[4]) if m[4] else 9
-                mm = int(m[5]) if m[5] else 0
-                return datetime(y, mo, d, hh, mm, tzinfo=_tz())
-            except:
-                return None
 
-        dts = [dt for dt in map(parse_one, cand) if dt]
+def get_ai_summary(content: str, fallback_title: str = "") -> str:
+    if not content or len(content) < 30:
+        return fallback_title or "内容过短，无需摘要"
 
-        if dts:
-            now = now_tz()
-            past = [dt for dt in dts if dt <= now]
-            return min(past or dts, key=lambda dt: abs((now - dt).total_seconds()))
+    if not AI_API_KEY:
+        return fallback_title or "（未配置 OPENAI_API_KEY）"
 
-        return None
+    system_prompt = (
+        "你是中文商业新闻编辑，请为新闻生成【一句话摘要】。\n"
+        "必须严格遵守：禁止脑补，不得添加原文未出现的信息；\n"
+        "不得使用“竞争对手、首次、史上、重磅、爆款”等推断性词汇；\n"
+        "摘要需保留关键数字与主体，长度≤25字，客观中性。"
+    )
 
-    def _fetch_detail_clean(self, url):
+    user_content = f"请基于以下新闻生成一句摘要：\n\n{content[:2000]}"
+
+    payload = {
+        "model": AI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": 120,
+        "temperature": 0.2,
+    }
+
+    try:
+        resp = requests.post(AI_CHAT_URL, json=payload, timeout=30)
+        resp.raise_for_status()
+        summary = resp.json()["choices"][0]["message"]["content"].strip().splitlines()[0]
+    except Exception:
+        return fallback_title or "（AI 摘要失败）"
+
+    if _need_fallback(summary, fallback_title, content):
+        return fallback_title or summary or "（AI 摘要不可靠）"
+
+    return summary
+
+
+# ============================
+#      解析财富中文网文章
+# ============================
+def fetch_article(url: str) -> dict:
+    resp = _SESSION.get(url, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    title = soup.select_one("h1").get_text(strip=True) if soup.select_one("h1") else ""
+    time_tag = soup.select_one(".source-date")
+    pub_time = time_tag.get_text(strip=True) if time_tag else ""
+
+    paragraphs = soup.select(".article-entry p")
+    content = "\n".join(p.get_text(strip=True) for p in paragraphs)
+
+    return {
+        "url": url,
+        "title": title,
+        "time": pub_time,
+        "content": content,
+    }
+
+
+# ============================
+#        抓取新闻列表
+# ============================
+LIST_URL = "https://www.fortunechina.com/business/c/{date}.htm"
+
+def fetch_news_list(date_str: str):
+    url = LIST_URL.format(date=date_str.replace("-", ""))
+    resp = _SESSION.get(url, timeout=10)
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    links = soup.select(".news-list a")
+
+    out = []
+    for a in links:
+        href = urljoin(url, a.get("href"))
+        out.append(href)
+
+    return out
+
+
+# ============================
+#     钉钉机器人推送
+# ============================
+def sign_dingtalk(secret: str):
+    ts = str(round(time.time() * 1000))
+    string_to_sign = f"{ts}\n{secret}".encode("utf-8")
+    h = hmac.new(secret.encode("utf-8"), string_to_sign, hashlib.sha256).digest()
+    sign = quote_plus(base64.b64encode(h))
+    return ts, sign
+
+
+def push_dingtalk(text: str):
+    bases = (os.getenv("DINGTALK_BASES") or "").split(",")
+    secrets = (os.getenv("DINGTALK_SECRETS") or "").split(",")
+
+    for base, secret in zip(bases, secrets):
+        if not base:
+            continue
+        ts, sign = sign_dingtalk(secret)
+        url = f"{base}&timestamp={ts}&sign={sign}"
+
+        body = {
+            "msgtype": "markdown",
+            "markdown": {"title": "每日商业资讯", "text": text},
+        }
         try:
-            r = self.session.get(url, timeout=(6, 20))
-            if r.status_code != 200:
-                print("[DetailFail]", url, r.status_code)
-                return None, [], ""
-
-            r.encoding = r.apparent_encoding or "utf-8"
-            soup = BeautifulSoup(r.text, "html.parser")
-
-            title_tag = soup.find(["h1", "h2"])
-            page_title = norm(title_tag.get_text()) if title_tag else ""
-
-            pub_dt = self._extract_pub_time(soup)
-
-            container = soup.select_one(
-                ".content-con.hr-rich-text.fn-wenda-detail-infomation.fn-hr-rich-text.custom-style-w"
-            ) or soup
-
-            for sel in [".other-wrap", ".txt", "a.prev.fn-dataStatistics-btn",
-                        "a.next.fn-dataStatistics-btn", ".footer", ".bottom"]:
-                for bad in container.select(sel):
-                    bad.decompose()
-
-            titles = self._extract_strong_titles(container)
-            if not titles:
-                titles = self._extract_numbered_titles(container)
-
-            return pub_dt, titles, page_title
-
-        except Exception as e:
-            print("[DetailError]", url, e)
-            return None, [], ""
-
-    # ------------------ Extract strong headings ------------------
-
-    def _extract_strong_titles(self, root: Tag):
-        keep = []
-
-        for st in root.select("strong"):
-            text = norm(st.get_text())
-            if not text:
-                continue
-            if len(text) < 4:
-                continue
-            text = re.split(r"[（(]?(阅读|阅读量|浏览|来源)[:：]\s*\d+.*$", text)[0].strip()
-            if not text:
-                continue
-            text = strip_leading_num(text)
-            if text:
-                keep.append(text)
-
-        seen = set()
-        out = []
-
-        for t in keep:
-            if t in seen:
-                continue
-            seen.add(t)
-            out.append(t)
-
-        return out
-
-    # ------------------ Extract numbered headings ------------------
-
-    def _extract_numbered_titles(self, root: Tag):
-        out = []
-
-        for p in root.find_all(["p", "h2", "h3", "div", "span", "li"]):
-            text = norm(p.get_text())
-            if looks_like_numbered(text):
-                text = strip_leading_num(text)
-                text = re.split(r"[（(]", text)[0].strip()
-                if text and len(text) >= 4:
-                    out.append(text)
-
-        seen = set()
-        final = []
-
-        for t in out:
-            if t in seen:
-                continue
-            seen.add(t)
-            final.append(t)
-
-        return final
+            requests.post(url, json=body, timeout=10)
+        except:
+            pass
 
 
-# ------------------ Build Markdown ------------------
+# ============================
+#            主流程
+# ============================
+def main():
+    date = get_target_date()
+    print(f"🗓 目标日期：{date}")
 
-def build_md(items):
-    n = now_tz()
-    out = [
-        f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  ",
-        "",
-        "**标题：人资日报｜每日要点**  ",
-        ""
-    ]
+    news_urls = fetch_news_list(date)
+    print(f"📌 共找到 {len(news_urls)} 条新闻。")
 
-    if not items:
-        out.append("> 未发现当天的“三茅日报”。")
-        return "\n".join(out)
+    items = []
+    for url in news_urls:
+        article = fetch_article(url)
+        summary = get_ai_summary(article["content"], article["title"])
+        items.append((summary, article["url"]))
 
-    it = items[0]
+    # 组装钉钉 Markdown
+    md = f"### 📰 财富中文网 · 商业资讯（{date}）\n"
+    for s, u in items:
+        md += f"- **{s}**  \n  <{u}>\n"
 
-    for idx, t in enumerate(it["titles"], 1):
-        out.append(f"{idx}. {t}  ")
+    push_dingtalk(md)
+    print("✅ 已推送至钉钉。")
 
-    out.append(f"[查看详细]({it['url']})  ")
-    return "\n".join(out)
-
-
-# ------------------ Main ------------------
 
 if __name__ == "__main__":
-    print("执行 hr_news_crawler.py（当天一条 · 三重日期校验 · strong 标题提取）")
-
-    c = HRLooCrawler()
-    c.crawl()
-
-    md = build_md(c.results)
-
-    print("\n===== Markdown Preview =====\n")
-    print(md)
-
-    send_dingtalk_markdown("人资日报｜每日要点", md)
+    main()
