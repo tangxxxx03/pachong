@@ -21,8 +21,8 @@ jobs:
       HR_REQUIRE_ALL: "0"
 
       # ——— 正确的钉钉变量 ——注意名称———
-      DINGTALK_BASE:   ${{ secrets.SHIYANQUNWEBHOOK }}
-      DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
+      DINGTALK_BASE:   ${{ secrets.DINGDINGXIAOQUNWEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.DINGDINGXIAOQUNSECRET }}
 
     steps:
       - name: Checkout code
