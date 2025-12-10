@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-三茅网「三茅日报」 + 财富中文网「商业频道」合并爬虫
+三茅网「三茅日报」 + 财富中文网「商业频道」合并爬虫 V12 (修复链接与乱码)
 —————————————————————————
 功能：
 1）从三茅网抓取当天的「三茅日报」并抽取要点标题
@@ -31,7 +31,7 @@ import base64
 import hashlib
 import urllib.parse
 from datetime import datetime, date
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -61,6 +61,18 @@ def norm(s: str) -> str:
 def zh_weekday(dt: datetime) -> str:
     return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][dt.weekday()]
 
+# --- 🎯 核心修复：URL 编码与清洗 ---
+def safe_url(url: str) -> str:
+    """
+    对 URL 进行清洗和编码，防止 Markdown 解析错误或 404。
+    只对路径部分编码，保留 :// 等符号。
+    """
+    if not url: return ""
+    # 先去除首尾空白
+    url = url.strip()
+    # 简单编码，safe 字符不编码
+    return quote(url, safe=":/?&amp;=#%")
+# -----------------------------------
 
 # ================== DingTalk 推送 ==================
 
@@ -82,10 +94,7 @@ def _sign_webhook(base: str, secret: str) -> str:
 
 def send_dingtalk_markdown_all(title: str, text: str) -> None:
     """
-    同时往多个群推送：
-      DINGTALK_BASES   = url1,url2
-      DINGTALK_SECRETS = secret1,secret2
-    个数对不上时，多余的会用空 secret
+    同时往多个群推送
     """
     bases = (os.getenv("DINGTALK_BASES") or "").split(",")
     secrets = (os.getenv("DINGTALK_SECRETS") or "").split(",")
@@ -141,87 +150,55 @@ def make_session() -> requests.Session:
 
 
 # ================== 三茅网：人资日报 ==================
+# (保持原有逻辑不变，只在生成 URL 时调用 safe_url)
 
 CN_TITLE_DATE = re.compile(r"[（(]\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*[)）]")
 
-
 def date_from_bracket_title(text: str):
     m = CN_TITLE_DATE.search(text or "")
-    if not m:
-        return None
+    if not m: return None
     try:
         y, mo, d = int(m[1]), int(m[2]), int(m[3])
         return date(y, mo, d)
-    except Exception:
-        return None
-
+    except Exception: return None
 
 def looks_like_numbered(text: str) -> bool:
     return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
 
-
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
-
-
 def strip_leading_num(t: str) -> str:
     t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
     t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
     t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
     return t.strip()
 
-
 class HRLooCrawler:
-    """
-    三茅网『三茅日报』爬虫（和你单独文件里的逻辑基本一致，略微收紧输出）
-    """
-
     def __init__(self):
         self.session = make_session()
         self.results = []
-
         t = (os.getenv("HR_TARGET_DATE") or "").strip()
         if t:
             try:
                 y, m, d = map(int, re.split(r"[-/\.]", t))
                 self.target_date = date(y, m, d)
             except Exception:
-                print("⚠ HR_TARGET_DATE 解析失败，使用今日。")
                 self.target_date = now_tz().date()
         else:
             self.target_date = now_tz().date()
-
         self.daily_title_pat = re.compile(r"三茅日[报報]")
-        self.sources = [
-            u.strip()
-            for u in os.getenv(
-                "SRC_HRLOO_URLS", "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
-            ).split(",")
-            if u.strip()
-        ]
-        print(f"[HRLOO CFG] target_date={self.target_date} {zh_weekday(now_tz())}")
-        print(f"[HRLOO CFG] sources={self.sources}")
+        self.sources = [u.strip() for u in os.getenv("SRC_HRLOO_URLS", "https://www.hrloo.com/,https://www.hrloo.com/news/hr").split(",") if u.strip()]
 
-    # —— 对外入口 ——
     def run(self):
         for base in self.sources:
-            if self._crawl_source(base):
-                break
+            if self._crawl_source(base): break
 
-    # —— 列表页 ——
     def _crawl_source(self, base: str) -> bool:
-        try:
-            r = self.session.get(base, timeout=20)
-        except Exception as e:
-            print("[HRLOO] 首页异常：", base, e)
-            return False
-
-        if r.status_code != 200:
-            print("[HRLOO] 首页失败：", base, r.status_code)
-            return False
-
+        try: r = self.session.get(base, timeout=20)
+        except Exception: return False
+        if r.status_code != 200: return False
         soup = BeautifulSoup(r.text, "html.parser")
-
-        # 1）优先用 dwxfd-list 容器
+        
+        # 1) dwxfd-list
         items = soup.select("div.dwxfd-list-items div.dwxfd-list-content-left")
         if items:
             for div in items:
@@ -229,122 +206,63 @@ class HRLooCrawler:
                 if dts:
                     try:
                         pub_d = datetime.strptime(dts.split()[0], "%Y-%m-%d").date()
-                        if pub_d != self.target_date:
-                            continue
-                    except Exception:
-                        pass
-
+                        if pub_d != self.target_date: continue
+                    except Exception: pass
                 a = div.find("a", href=True)
-                if not a:
-                    continue
-
+                if not a: continue
                 title_text = norm(a.get_text())
-                if not self.daily_title_pat.search(title_text):
-                    continue
-
+                if not self.daily_title_pat.search(title_text): continue
                 t2 = date_from_bracket_title(title_text)
-                if t2 and t2 != self.target_date:
-                    continue
-
+                if t2 and t2 != self.target_date: continue
                 abs_url = urljoin(base, a["href"])
-                if self._try_detail(abs_url):
-                    return True
+                if self._try_detail(abs_url): return True
 
-            print("[HRLOO MISS] 容器通道未命中：", base)
-
-        # 2）兜底：扫描 /news/ 链接
+        # 2) /news/
         links = []
         for a in soup.select("a[href*='/news/']"):
             href = a.get("href", "")
-            if not re.search(r"/news/\d+\.html$", href):
-                continue
+            if not re.search(r"/news/\d+\.html$", href): continue
             text = norm(a.get_text())
-            if not self.daily_title_pat.search(text):
-                continue
+            if not self.daily_title_pat.search(text): continue
             t2 = date_from_bracket_title(text)
-            if t2 and t2 != self.target_date:
-                continue
+            if t2 and t2 != self.target_date: continue
             links.append(urljoin(base, href))
-
         seen = set()
         for url in links:
-            if url in seen:
-                continue
+            if url in seen: continue
             seen.add(url)
-            if self._try_detail(url):
-                return True
-
-        print("[HRLOO MISS] 未命中目标日期：", base)
+            if self._try_detail(url): return True
         return False
 
-    # —— 详情页 ——
     def _try_detail(self, abs_url: str) -> bool:
         pub_dt, titles, page_title = self._fetch_detail_clean(abs_url)
-
-        if not page_title or not self.daily_title_pat.search(page_title):
-            return False
-
+        if not page_title or not self.daily_title_pat.search(page_title): return False
         t3 = date_from_bracket_title(page_title)
-        if t3 and t3 != self.target_date:
-            return False
-
-        if pub_dt and pub_dt.date() != self.target_date and not t3:
-            return False
-
-        if not titles:
-            return False
-
-        self.results.append(
-            {
-                "title": page_title,
-                "url": abs_url,
-                "date": pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else f"{self.target_date} 09:00",
-                "titles": titles,
-            }
-        )
-
-        print(f"[HRLOO HIT] {abs_url} -> {len(titles)} 条")
+        if t3 and t3 != self.target_date: return False
+        if pub_dt and pub_dt.date() != self.target_date and not t3: return False
+        if not titles: return False
+        self.results.append({
+            "title": page_title,
+            "url": safe_url(abs_url), # 使用 safe_url 清洗链接
+            "date": pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else f"{self.target_date} 09:00",
+            "titles": titles,
+        })
         return True
 
     def _extract_pub_time(self, soup: BeautifulSoup):
         cand = []
-
-        for t in soup.select("time[datetime]"):
-            cand.append(t.get("datetime", ""))
-
-        for m in soup.select(
-            "meta[property='article:published_time'],meta[name='pubdate'],meta[name='publishdate']"
-        ):
-            cand.append(m.get("content", ""))
-
-        for sel in [
-            ".time",
-            ".date",
-            ".pubtime",
-            ".publish-time",
-            ".post-time",
-            ".info",
-            "meta[itemprop='datePublished']",
-        ]:
+        for t in soup.select("time[datetime]"): cand.append(t.get("datetime", ""))
+        for m in soup.select("meta[property='article:published_time'],meta[name='pubdate'],meta[name='publishdate']"): cand.append(m.get("content", ""))
+        for sel in [".time", ".date", ".pubtime", ".publish-time", ".post-time", ".info", "meta[itemprop='datePublished']"]:
             for x in soup.select(sel):
-                if isinstance(x, Tag):
-                    cand.append(x.get_text(" ", strip=True))
-
+                if isinstance(x, Tag): cand.append(x.get_text(" ", strip=True))
         pat = re.compile(r"(20\d{2})[./\-年](\d{1,2})[./\-月](\d{1,2})(?:\D+(\d{1,2}):(\d{1,2}))?")
-
-        def parse_one(s):
+        dts = []
+        for s in cand:
             m = pat.search(s or "")
-            if not m:
-                return None
-            try:
-                y, mo, d = int(m[1]), int(m[2]), int(m[3])
-                hh = int(m[4]) if m[4] else 9
-                mm = int(m[5]) if m[5] else 0
-                return datetime(y, mo, d, hh, mm, tzinfo=_tz())
-            except Exception:
-                return None
-
-        dts = [dt for dt in map(parse_one, cand) if dt]
+            if m:
+                try: dts.append(datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]) if m[4] else 9, int(m[5]) if m[5] else 0, tzinfo=_tz()))
+                except Exception: pass
         if dts:
             now = now_tz()
             past = [dt for dt in dts if dt <= now]
@@ -354,63 +272,32 @@ class HRLooCrawler:
     def _fetch_detail_clean(self, url: str):
         try:
             r = self.session.get(url, timeout=(6, 20))
-            if r.status_code != 200:
-                print("[HRLOO DetailFail]", url, r.status_code)
-                return None, [], ""
-
+            if r.status_code != 200: return None, [], ""
             r.encoding = r.apparent_encoding or "utf-8"
             soup = BeautifulSoup(r.text, "html.parser")
-
             title_tag = soup.find(["h1", "h2"])
             page_title = norm(title_tag.get_text()) if title_tag else ""
-
             pub_dt = self._extract_pub_time(soup)
-
-            container = (
-                soup.select_one(
-                    ".content-con.hr-rich-text.fn-wenda-detail-infomation.fn-hr-rich-text.custom-style-w"
-                )
-                or soup
-            )
-
-            for sel in [
-                ".other-wrap",
-                ".txt",
-                "a.prev.fn-dataStatistics-btn",
-                "a.next.fn-dataStatistics-btn",
-                ".footer",
-                ".bottom",
-            ]:
-                for bad in container.select(sel):
-                    bad.decompose()
-
+            container = soup.select_one(".content-con.hr-rich-text.fn-wenda-detail-infomation.fn-hr-rich-text.custom-style-w") or soup
+            for sel in [".other-wrap", ".txt", "a.prev.fn-dataStatistics-btn", "a.next.fn-dataStatistics-btn", ".footer", ".bottom"]:
+                for bad in container.select(sel): bad.decompose()
             titles = self._extract_strong_titles(container)
-            if not titles:
-                titles = self._extract_numbered_titles(container)
-
+            if not titles: titles = self._extract_numbered_titles(container)
             return pub_dt, titles, page_title
-
-        except Exception as e:
-            print("[HRLOO DetailError]", url, e)
-            return None, [], ""
+        except Exception: return None, [], ""
 
     def _extract_strong_titles(self, root: Tag):
         keep = []
         for st in root.select("strong"):
             text = norm(st.get_text())
-            if not text or len(text) < 4:
-                continue
+            if not text or len(text) < 4: continue
             text = re.split(r"[（(]?(阅读|阅读量|浏览|来源)[:：]\s*\d+.*$", text)[0].strip()
-            if not text:
-                continue
+            if not text: continue
             text = strip_leading_num(text)
-            if text:
-                keep.append(text)
-
+            if text: keep.append(text)
         seen, out = set(), []
         for t in keep:
-            if t in seen:
-                continue
+            if t in seen: continue
             seen.add(t)
             out.append(t)
         return out
@@ -422,30 +309,19 @@ class HRLooCrawler:
             if looks_like_numbered(text):
                 text = strip_leading_num(text)
                 text = re.split(r"[（(]", text)[0].strip()
-                if text and len(text) >= 4:
-                    out.append(text)
+                if text and len(text) >= 4: out.append(text)
         seen, final = set(), []
         for t in out:
-            if t in seen:
-                continue
+            if t in seen: continue
             seen.add(t)
             final.append(t)
         return final
 
-
 def build_hrloo_md_block(crawler: HRLooCrawler) -> str:
-    """
-    输出三茅日报这一块 Markdown
-    """
-    n = now_tz()
-    if not crawler.results:
-        return "> 今天未发现三茅网发布“三茅日报”。\n"
-
+    if not crawler.results: return "> 今天未发现三茅网发布“三茅日报”。\n"
     it = crawler.results[0]
-    out = []
-    out.append(f"**三茅日报 · {it['date']}**  \n")
-    for idx, t in enumerate(it["titles"], 1):
-        out.append(f"{idx}. {t}  ")
+    out = [f"**三茅日报 · {it['date']}** \n"]
+    for idx, t in enumerate(it["titles"], 1): out.append(f"{idx}. {t}  ")
     out.append(f"[👉 查看原文]({it['url']})  ")
     return "\n".join(out) + "\n"
 
@@ -453,14 +329,10 @@ def build_hrloo_md_block(crawler: HRLooCrawler) -> str:
 # ================== 财富中文网 商业频道 ==================
 
 BASE_FORTUNE = "https://www.fortunechina.com"
-
+# 列表页 URL，用于正确拼接相对路径
+LIST_URL_FORTUNE = "https://www.fortunechina.com/shangye/"
 
 class FortuneChinaCrawler:
-    """
-    财富中文网 · 商业频道（PC 版）爬虫
-    只抓标题 / 链接 / 日期，不做正文解析
-    """
-
     def __init__(self, max_items: int = 5):
         self.session = make_session()
         self.max_items = max_items
@@ -478,46 +350,45 @@ class FortuneChinaCrawler:
         soup = BeautifulSoup(r.text, "html.parser")
         items = []
 
-        # PC 结构：ul.news-list li.news-item
         for li in soup.select("ul.news-list li.news-item"):
             h2 = li.find("h2")
             a = li.find("a", href=True)
             date_div = li.find("div", class_="date")
 
-            if not (h2 and a):
-                continue
+            if not (h2 and a): continue
 
             href = a["href"].strip()
-            if not re.search(r"/\d{4}-\d{2}/\d{2}/content_\d+\.htm", href):
-                continue
+            # 简单校验
+            if not re.search(r"content_\d+\.htm", href): continue
 
             title = norm(h2.get_text())
-            full_url = urljoin(BASE_FORTUNE, href)
+            
+            # --- 🎯 核心修复：URL 拼接 ---
+            # 使用列表页 LIST_URL_FORTUNE 作为基准，解决相对路径 404 问题
+            full_url = urljoin(LIST_URL_FORTUNE, href)
+            # ---------------------------
+
             pub_date = norm(date_div.get_text()) if date_div else ""
 
-            items.append(
-                {
-                    "title": title,
-                    "url": full_url,
-                    "date": pub_date,
-                }
-            )
+            items.append({
+                "title": title,
+                "url": safe_url(full_url), # 清洗 URL
+                "date": pub_date,
+            })
 
         print(f"[Fortune] 抓到 {len(items)} 条。")
         return items
 
     def run(self):
-        """只抓前若干条（跨多页的话可以扩展，这里简单用第 1 页）"""
         items = self.fetch_list_page(page=1)
         return items[: self.max_items]
 
 
 def build_fortune_md_block(items) -> str:
-    if not items:
-        return "> 财富中文网商业频道暂无抓取到内容。\n"
-
-    out = ["**财富中文网 · 商业频道精选**  ", ""]
+    if not items: return "> 财富中文网商业频道暂无抓取到内容。\n"
+    out = ["**财富中文网 · 商业频道精选** ", ""]
     for i, it in enumerate(items, 1):
+        # 钉钉链接格式：[标题](链接)
         out.append(f"{i}. [{it['title']}]({it['url']})  （{it['date']}）")
     return "\n".join(out) + "\n"
 
@@ -526,8 +397,8 @@ def build_fortune_md_block(items) -> str:
 
 def build_final_markdown(hr_md: str, fortune_md: str) -> str:
     n = now_tz()
-    head = f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）**  \n\n"
-    head += "**人资 & 商业情报 · 每日简报**  \n\n"
+    head = f"**日期：{n.strftime('%Y-%m-%d')}（{zh_weekday(n)}）** \n\n"
+    head += "**人资 & 商业情报 · 每日简报** \n\n"
     parts = [
         "### 一、HR 人资热点（来自三茅网）",
         "",
@@ -541,7 +412,7 @@ def build_final_markdown(hr_md: str, fortune_md: str) -> str:
 
 
 def main():
-    print("=== 合并爬虫开始执行（三茅 + 财富中文网） ===")
+    print("=== 合并爬虫开始执行（三茅 + 财富中文网）V12 ===")
 
     # 1) 三茅日报
     hr = HRLooCrawler()
