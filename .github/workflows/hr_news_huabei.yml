@@ -1,28 +1,35 @@
-name: HR 华北资讯爬虫
+name: HR News（三茅人力资源网净化版）
 
 on:
-  # 手动触发
   workflow_dispatch: {}
-  # 周一到周五，北京时间 09:00（GitHub Actions 用的是 UTC）
   schedule:
+    # 每周一到周五，北京时间 09:00（GitHub Actions 用 UTC）
     - cron: "0 1 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     env:
-      # —— 钉钉机器人（华北群）——
-      # 按你之前 secrets 的名字来，如果不一样就把下面两个改成你自己的
+      # —— 运行策略 —— 
+      HR_TZ: Asia/Shanghai
+      HR_ONLY_TODAY: "1"        # 只抓当天
+      HR_MAX_ITEMS: "1"         # 只取当天一条
+
+      # —— 抓取入口 —— 
+      SRC_HRLOO_URLS: "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
+
+      # —— 关键词过滤 —— 
+      HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
+      HR_REQUIRE_ALL: "0"
+
+      # —— 单钉钉机器人 —— 
       DINGTALK_BASES:   ${{ secrets.SHIYANQUNWEBHOOK }}
       DINGTALK_SECRETS: ${{ secrets.SHIYANQUNSECRET }}
 
-      # 可选：指定抓取日期，不填就是默认“今天”
-      HR_TARGET_DATE: ""
-
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -32,10 +39,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests beautifulsoup4 urllib3 tzdata
+          fi
 
-      - name: Run HR Huabei crawler
+      - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          # 注意这里的路径：在 “python scripts” 文件夹下面，
-          # 所以要写成 "python scripts/xxx.py"，还要加引号防止空格出问题
-          python "python scripts/hr-news-huabei.py"
+          echo "执行 hr-news-huabei.py"
+          python "hr-news-huabei.py"
