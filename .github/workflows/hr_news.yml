@@ -1,28 +1,35 @@
-
-name: HR News Crawler (Sanmao Daily)
+name: HR News（三茅人力资源网净化版）
 
 on:
-  schedule:
-    # 每个工作日 北京时间 09:00（UTC+8 → UTC 01:00）
-    - cron: "0 1 * * 1-5"
   workflow_dispatch: {}
+  schedule:
+    # 每周一到周五，北京时间 09:00（GitHub Actions 用 UTC）
+    - cron: "0 1 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     env:
-      # ---- 你的钉钉机器人（必填）----
-      DINGTALK_BASE: "https://oapi.dingtalk.com/robot/send?access_token=9bb5d79464e0bf60f9c0f56ffd99744c4149fc43554982c0189ffe9c04162dce"
-      DINGTALK_SECRET: "SEC4d9521a7cf6f96fcf6ea9832116df97b13300441f4e513f487a6502d833def75"
-      # ---- 可选：支持多源 ----
+      # —— 运行策略 —— 
+      HR_TZ: Asia/Shanghai
+      HR_ONLY_TODAY: "1"        # 只抓当天
+      HR_MAX_ITEMS: "1"         # 只取当天一条
+
+      # —— 抓取入口 —— 
       SRC_HRLOO_URLS: "https://www.hrloo.com/,https://www.hrloo.com/news/hr"
-      # ---- 可选：固定抓取某一天 ----
-      # HR_TARGET_DATE: "2025-01-15"
-      # --------------------------------
+
+      # —— 关键词过滤 —— 
+      HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
+      HR_REQUIRE_ALL: "0"
+
+      # —— 单钉钉机器人 —— 
+      DINGTALK_BASES:   ${{ secrets.SHIYANQUNWEBHOOK }}
+      DINGTALK_SECRETS: ${{ secrets.SHIYANQUNSECRET }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -32,10 +39,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4 requests urllib3 backports.zoneinfo --quiet
-          pip install -r requirements.txt --quiet || true
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests beautifulsoup4 urllib3 tzdata
+          fi
 
-      - name: Run hr_news_crawler.py
+      - name: Run HRLoo（三茅日报 · 当天一条）
         run: |
-          echo "== 开始执行 hr_news_crawler.py =="
-          python hr_news_crawler.py
+          echo "执行 hr-news-huabei.py"
+          python "hr-news-huabei.py"
