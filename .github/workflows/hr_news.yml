@@ -1,4 +1,4 @@
-name: HR News（三茅人力资源网净化版）
+name: HR News（大客户群）
 
 on:
   workflow_dispatch: {}
