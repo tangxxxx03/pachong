@@ -3,7 +3,7 @@ name: Daily HR + Fortune China 合并爬虫
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"
+    - cron: "0 1 * * 1-5"   # 周一到周五，北京时间 09:00（GitHub 用 UTC）
 
 jobs:
   run:
@@ -16,16 +16,11 @@ jobs:
       AI_API_BASE: "https://api.siliconflow.cn/v1"
       AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
 
-      # —— 钉钉推送：两个群聊机器人（用英文逗号隔开）——
-      DINGTALK_BASES: >
-        ${{ secrets.DINGDINGSHANGYEWE }},
-        ${{ secrets.DINGDINGXIAOQUNWEHOOK }}
+      # —— 钉钉推送：单个群聊机器人 —— 
+      DINGTALK_BASES:   ${{ secrets.SHIYANQUNWEBHOOK }}
+      DINGTALK_SECRETS: ${{ secrets.SHIYANQUNSECRET }}
 
-      DINGTALK_SECRETS: >
-        ${{ secrets.DINGDINGSHANGYE }},
-        ${{ secrets.DINGDINGXIAOQUNSECRET }}
-
-      # —— 可选日期控制 —— 
+      # —— 可选日期控制（为空则按默认：三茅=当天，财富=昨天） —— 
       HR_TARGET_DATE: ""
       TARGET_DATE: ""
 
