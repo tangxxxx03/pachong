@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-三茅网 + 财富中文网 合并爬虫 V21 (30字极限压缩版)
+三茅网 + 财富中文网 合并爬虫 V23 (清单早报风)
 —————————————————————————
 核心更新：
-Prompt 强制要求“30字以内”，拒绝一切废话，只保留核心冲突和结果。
+1. 彻底去标签化：不再强行定义“HR”或“商业”，回归来源属性。
+2. 视觉优化：Emoji 引导，链接行内化（更省空间）。
 """
 
 import os
@@ -23,14 +24,11 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
 # --- AI 依赖 ---
-AI_DEBUG_MSG = "" 
 try:
     from openai import OpenAI
     HAS_OPENAI_LIB = True
 except ImportError:
-    print("⚠️ 警告：缺少 openai 库，请在 yml 文件中运行 pip install openai")
     HAS_OPENAI_LIB = False
-    AI_DEBUG_MSG = "(AI库缺失)"
 
 try:
     from zoneinfo import ZoneInfo
@@ -57,48 +55,30 @@ def safe_url(url: str) -> str:
     return quote(url.strip(), safe=":/?&amp;=#%")
 
 
-# ================== AI 总结模块 (30字极限 Prompt) ==================
+# ================== AI 总结模块 ==================
 
 AI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 AI_API_BASE = os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1").rstrip("/")
 AI_MODEL = os.getenv("AI_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 AI_CLIENT = None
-if HAS_OPENAI_LIB:
-    if AI_API_KEY:
-        try:
-            AI_CLIENT = OpenAI(api_key=AI_API_KEY, base_url=AI_API_BASE)
-        except Exception as e:
-            print(f"[AI Init Error] {e}")
-            AI_DEBUG_MSG = f"(AI配置错误)"
-    else:
-        AI_DEBUG_MSG = "(AI Key缺失)"
-elif not AI_DEBUG_MSG:
-    AI_DEBUG_MSG = "(AI库缺失)"
+if HAS_OPENAI_LIB and AI_API_KEY:
+    try:
+        AI_CLIENT = OpenAI(api_key=AI_API_KEY, base_url=AI_API_BASE)
+    except: pass
 
 def get_ai_summary(content: str, title: str = "") -> str:
-    """调用 AI 生成30字以内的极限短语"""
-    if not AI_CLIENT:
-        return f"{title} {AI_DEBUG_MSG}"
-
-    if not content or len(content) < 50:
-        return title
+    """30字极限总结"""
+    if not AI_CLIENT: return title 
+    if not content or len(content) < 50: return title
 
     print(f"  🤖 正在 AI 总结: {title[:10]}...")
     
-    # --- ⚡️ 30字极限 Prompt ---
     system_prompt = (
-        "你是一个**字字千金**的极简快讯编辑。请将新闻压缩为一句**30字以内**的超短标题。\n\n"
-        "**绝对规则：**\n"
-        "1. **字数锁死**：必须在 **30个中文字** 以内！多一个字都不行。\n"
-        "2. **去废话**：删掉“表示”、“指出”、“认为”、“强调”等动词，直接说结论。\n"
-        "3. **结果导向**：直接讲结局（如“美债恐崩盘”而非“美国债务面临危机”）。\n"
-        "4. **禁止标签**：不要写“摘要：”或“背景：”。\n"
-        "5. **防幻觉**：如果无法概括，返回原标题。"
+        "你是一个字字千金的快讯编辑。请将新闻压缩为一句**30字以内**的极简短语。\n"
+        "规则：1.字数锁死30字内。2.去废话，直接说结论。3.禁止任何标签前缀。"
     )
-    
-    user_prompt = f"【新闻标题】：{title}\n\n【新闻正文】：\n{content[:2000]}"
-    # ---------------------------
+    user_prompt = f"标题：{title}\n正文：{content[:2000]}"
 
     try:
         resp = AI_CLIENT.chat.completions.create(
@@ -107,23 +87,18 @@ def get_ai_summary(content: str, title: str = "") -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=60, # 进一步缩减 token
+            max_tokens=60, 
             temperature=0.3 
         )
         summary = resp.choices[0].message.content.strip()
         summary = summary.replace('"', '').replace("'", "").replace("\n", " ")
-        
-        # 再次清洗：如果 AI 不听话加了标签，手动删掉
         summary = re.sub(r"^(摘要|结论|核心|背景)[/:]\s*", "", summary)
         
-        if "原标题" in summary and len(summary) < 10:
-            return title
-            
+        if "原标题" in summary and len(summary) < 10: return title
         print(f"  ✨ 摘要成功: {summary[:20]}...")
         return summary
-    except Exception as e:
-        print(f"  ⚠️ AI 调用失败: {e}")
-        return f"{title} (AI失败)"
+    except:
+        return title
 
 
 # ================== HTTP Session ==================
@@ -185,8 +160,7 @@ class HRLooCrawler:
 
             for a in soup.select("a[href*='/news/']"):
                 if self._check_and_fetch(base, a): return True
-        except Exception as e:
-            print(f"[HR Error] {base}: {e}")
+        except: pass
         return False
 
     def _check_and_fetch(self, base, a):
@@ -201,7 +175,6 @@ class HRLooCrawler:
             r = self.session.get(url, timeout=15)
             r.encoding = "utf-8"
             soup = BeautifulSoup(r.text, "html.parser")
-            
             container = soup.select_one(".content-con.hr-rich-text") or soup
             titles = []
             for st in container.select("strong"):
@@ -220,7 +193,6 @@ class HRLooCrawler:
                 self.results.append({
                     "title": "三茅日报",
                     "url": safe_url(url),
-                    "date": str(self.target_date),
                     "titles": titles
                 })
                 return True
@@ -228,13 +200,14 @@ class HRLooCrawler:
         return False
 
 def build_hr_md(crawler):
-    if not crawler.results: return "> 今日未抓取到三茅日报。\n"
+    if not crawler.results: return "> 今日三茅暂无更新。\n"
     it = crawler.results[0]
-    md = [f"**三茅日报 · {it['date']}** \n"]
+    # 中性标题，不强调“HR”
+    md = [f"**📰 三茅资讯**"]
     for i, t in enumerate(it['titles'], 1):
-        md.append(f"{i}. {t}")
-    md.append(f"\n[👉 查看原文]({it['url']})\n")
-    return "\n".join(md)
+        # 链接缩小成一个小图标放在句尾，显得更整洁
+        md.append(f"{i}. {t} [🔗]({it['url']})")
+    return "\n".join(md) + "\n"
 
 
 # ================== 财富中文网爬虫 ==================
@@ -249,7 +222,7 @@ class FortuneCrawler:
         self.items = []
 
     def run(self):
-        print(f"[Fortune] 开始抓取列表 (Max: {self.max_items})...")
+        print(f"[Fortune] 开始抓取...")
         try:
             r = self.session.get(LIST_URL, timeout=15)
             r.encoding = "utf-8" 
@@ -261,7 +234,6 @@ class FortuneCrawler:
                 
                 h2 = li.find("h2")
                 a = li.find("a", href=True)
-                date_div = li.find("div", class_="date")
                 
                 if not (h2 and a): continue
                 
@@ -269,7 +241,6 @@ class FortuneCrawler:
                 if "content_" not in href: continue 
                 
                 title = norm(h2.get_text())
-                pub_date = norm(date_div.get_text()) if date_div else ""
                 full_url = urljoin(LIST_URL, href)
                 
                 content = self._fetch_content(full_url)
@@ -278,8 +249,7 @@ class FortuneCrawler:
                 self.items.append({
                     "title": title,
                     "summary": ai_summary, 
-                    "url": safe_url(full_url),
-                    "date": pub_date
+                    "url": safe_url(full_url)
                 })
                 cnt += 1
                 
@@ -287,7 +257,6 @@ class FortuneCrawler:
             print(f"[Fortune Error] {e}")
 
     def _fetch_content(self, url):
-        """抓取正文用于 AI 总结"""
         try:
             r = self.session.get(url, timeout=10)
             r.encoding = "utf-8" 
@@ -295,18 +264,18 @@ class FortuneCrawler:
             container = soup.select_one("div.article-mod div.word-text-con") or \
                         soup.select_one("div.article-content")
             
-            if container:
-                return norm(container.get_text())
-        except:
-            pass
+            if container: return norm(container.get_text())
+        except: pass
         return ""
 
 def build_fortune_md(crawler):
-    if not crawler.items: return "> 财富中文网暂无内容。\n"
-    md = ["**财富中文网 · 商业精选 (AI 摘要)** \n"]
+    if not crawler.items: return "> 今日财富暂无更新。\n"
+    # 中性标题，不强调“商业热点”
+    md = ["**🚀 财富商业**"]
     for i, it in enumerate(crawler.items, 1):
         display_text = it['summary']
-        md.append(f"{i}. [{display_text}]({it['url']})")
+        # 链接放在句尾
+        md.append(f"{i}. {display_text} [🔗]({it['url']})")
     return "\n".join(md) + "\n"
 
 
@@ -343,7 +312,7 @@ def send_dingtalk(title, text):
             print(f"❌ 推送失败: {e}")
 
 def main():
-    print("=== 启动合并爬虫 V21 (30字极限版) ===")
+    print("=== 启动合并爬虫 V23 (清单早报版) ===")
     
     # 1. 三茅
     hr = HRLooCrawler()
@@ -355,19 +324,17 @@ def main():
     fc.run()
     fc_md = build_fortune_md(fc)
     
-    # 3. 合并
+    # 3. 合并 - 极简标题
     final_md = (
-        f"**人资 & 商业早报 ({now_tz().strftime('%Y-%m-%d')})** \n\n"
-        "### 一、HR 热点 (三茅网)\n"
+        f"**📅 {now_tz().strftime('%m-%d')} 每日早报** \n\n"
         f"{hr_md}\n"
-        "### 二、商业热点 (财富中文网)\n"
         f"{fc_md}"
     )
     
     print("\n--- Markdown 预览 ---\n")
     print(final_md)
     
-    send_dingtalk("人资&商业早报", final_md)
+    send_dingtalk("每日早报", final_md)
 
 if __name__ == "__main__":
     main()
