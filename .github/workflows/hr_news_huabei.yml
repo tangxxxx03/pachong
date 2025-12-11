@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   schedule:
     # 每周一到周五，北京时间 09:00（GitHub Actions 用 UTC）
-
+    - cron: "0 1 * * 1-5"
 
 jobs:
   run:
