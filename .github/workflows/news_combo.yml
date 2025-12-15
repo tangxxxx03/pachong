@@ -24,8 +24,8 @@ jobs:
       AI_MODEL: "Qwen/Qwen2.5-7B-Instruct"
 
       # ——— 钉钉配置 (从您的 Secrets 读取) ———
-      DINGTALK_BASES:   ${{ secrets.SHIYANQUNWEBHOOK }}
-      DINGTALK_SECRETS: ${{ secrets.SHIYANQUNSECRET }}
+      DINGTALK_BASES:   ${{ secrets.XIAOQUNWEBHOOK }}
+      DINGTALK_SECRETS: ${{ secrets.XIAOQUNSECRET }}
 
       # ——— 爬虫参数 ———
       FORTUNE_MAX_ITEMS: 5
