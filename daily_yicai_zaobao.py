@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-第一财经「一财早报」(feed/669) — 只抓 RSS description 中的【观国内】和【大公司】两段
+一财早报：仅提取【观国内】与【大公司】（兼容 RSSHub 镜像差异）
 
-本版本修复：
-- RSSHub 公共实例在 GitHub Actions 常见 403/429：增加多实例 fallback + 重试退避
-- 支持通过环境变量覆盖 RSSHub 实例列表（推荐你后续用自建）
+增强点：
+- RSSHub 镜像的 description 结构可能不同：改用“文本切片”更稳
+- 同时尝试 summary/description/content 字段
+- RSSHub 多 base 自动 fallback + 重试
 
-环境变量（必选）：
-- DINGTALK_WEBHOOK
-- DINGTALK_SECRET（可选）
-
-环境变量（可选）：
-- TOP_N: 每天推送条数，默认 8
-- RSSHUB_BASES: 多个 RSSHub base，用逗号分隔，例如：
-    https://rsshub.app,https://rsshub.rssforever.com
-  不填则使用内置列表
-- RSSHUB_ROUTE: 默认 /yicai/feed/669
+环境变量：
+- DINGTALK_WEBHOOK (必填)
+- DINGTALK_SECRET (可选)
+- RSSHUB_BASES (可选，逗号分隔)
+- RSSHUB_ROUTE (可选，默认 /yicai/feed/669)
+- TOP_N (可选，默认 8)
 """
 
 import os
@@ -31,17 +28,12 @@ from typing import List, Dict, Any, Optional
 
 import requests
 import feedparser
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
-# =========================
-# 配置
-# =========================
 DATA_DIR = "data"
 SENT_PATH = os.path.join(DATA_DIR, "sent_links.json")
 
 DEFAULT_RSSHUB_ROUTE = "/yicai/feed/669"
-
-# 内置备用 RSSHub 实例（公共镜像不保证长期可用，但可作为临时救火）
 DEFAULT_RSSHUB_BASES = [
     "https://rsshub.app",
     "https://rsshub.rssforever.com",
@@ -56,12 +48,8 @@ SECTION_ALLOW = ["观国内", "大公司"]
 TITLE_BLOCKLIST = ["报名", "课程", "训练营", "优惠", "促销", "广告", "软文", "带货"]
 
 
-# =========================
-# 基础工具
-# =========================
 def ensure_data_dir():
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 def load_sent_links() -> set:
     ensure_data_dir()
@@ -89,39 +77,29 @@ def safe_get(url: str) -> requests.Response:
     return requests.get(url, timeout=FETCH_TIMEOUT, headers={"User-Agent": UA})
 
 def get_rsshub_bases() -> List[str]:
-    bases_env = (os.getenv("RSSHUB_BASES") or "").strip()
-    if bases_env:
-        bases = [b.strip().rstrip("/") for b in bases_env.split(",") if b.strip()]
+    env = (os.getenv("RSSHUB_BASES") or "").strip()
+    if env:
+        bases = [b.strip().rstrip("/") for b in env.split(",") if b.strip()]
         return bases or [b.rstrip("/") for b in DEFAULT_RSSHUB_BASES]
     return [b.rstrip("/") for b in DEFAULT_RSSHUB_BASES]
 
 def build_rsshub_urls() -> List[str]:
-    route_env = (os.getenv("RSSHUB_ROUTE") or "").strip()
-    route = route_env or DEFAULT_RSSHUB_ROUTE
+    route = (os.getenv("RSSHUB_ROUTE") or "").strip() or DEFAULT_RSSHUB_ROUTE
     if not route.startswith("/"):
         route = "/" + route
-    return [f"{base}{route}" for base in get_rsshub_bases()]
+    return [f"{b}{route}" for b in get_rsshub_bases()]
 
 
-# =========================
-# RSS 拉取（多实例 fallback）
-# =========================
 def fetch_rss_items() -> List[Dict[str, Any]]:
     urls = build_rsshub_urls()
-
     last_err = None
+
     for url in urls:
-        # 每个实例给 2 次尝试，403/429/5xx 就换下一个
         for attempt in range(2):
             try:
                 r = safe_get(url)
-
-                # 对常见拒绝做显式处理
-                if r.status_code in (403, 429):
-                    raise requests.HTTPError(f"{r.status_code} Forbidden/RateLimit for url: {url}", response=r)
-                if 500 <= r.status_code < 600:
-                    raise requests.HTTPError(f"{r.status_code} ServerError for url: {url}", response=r)
-
+                if r.status_code in (403, 429) or (500 <= r.status_code < 600):
+                    raise requests.HTTPError(f"{r.status_code} for {url}", response=r)
                 r.raise_for_status()
 
                 feed = feedparser.parse(r.content)
@@ -132,11 +110,16 @@ def fetch_rss_items() -> List[Dict[str, Any]]:
                     link = clean_text(getattr(e, "link", ""))
                     published = clean_text(getattr(e, "published", "") or getattr(e, "updated", ""))
 
-                    desc = ""
-                    if hasattr(e, "summary"):
-                        desc = e.summary
-                    elif hasattr(e, "description"):
-                        desc = e.description
+                    # 关键：多字段兜底
+                    html = ""
+                    if getattr(e, "content", None):
+                        # feedparser 的 content 是 list，取第一项 value
+                        try:
+                            html = e.content[0].value
+                        except Exception:
+                            html = ""
+                    if not html:
+                        html = getattr(e, "summary", "") or getattr(e, "description", "") or ""
 
                     if not title or not link:
                         continue
@@ -147,19 +130,18 @@ def fetch_rss_items() -> List[Dict[str, Any]]:
                         "title": title,
                         "url": link,
                         "published": published,
-                        "description_html": desc,
+                        "html": html,
                         "source": url
                     })
 
                 if not items:
-                    raise RuntimeError(f"RSS parsed but empty entries: {url}")
+                    raise RuntimeError(f"RSS empty: {url}")
 
                 print(f"[RSS] ok via: {url}, entries={len(items)}")
                 return items
 
             except Exception as e:
                 last_err = e
-                # 退避一下再试
                 time.sleep(1.5 * (attempt + 1))
 
         print(f"[RSS] switch to next base after failures: {url}")
@@ -167,91 +149,70 @@ def fetch_rss_items() -> List[Dict[str, Any]]:
     raise RuntimeError(f"所有 RSSHub 实例都失败了，最后错误：{last_err}")
 
 
-# =========================
-# 解析 description：只提取【观国内】【大公司】
-# =========================
-def _normalize_section_name(text: str) -> Optional[str]:
-    t = clean_text(text)
-    if not t:
-        return None
-    t = t.replace("【", "").replace("】", "")
-    t = re.sub(r"\s+", "", t)
-    if t in SECTION_ALLOW:
-        return t
-    return None
+def html_to_plain_text(html: str) -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    # 这里用换行保留结构感，便于切片
+    text = soup.get_text("\n")
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
 
-def extract_sections_from_description(description_html: str) -> Dict[str, List[str]]:
-    result = {name: [] for name in SECTION_ALLOW}
-    if not description_html:
-        return result
 
-    soup = BeautifulSoup(description_html, "html.parser")
-    ps = soup.find_all("p")
-    current_section: Optional[str] = None
+def slice_section(text: str, section: str) -> List[str]:
+    """
+    从纯文本里提取某个 section 的内容，返回若干行。
+    兼容：
+    - 【观国内】 / 观国内
+    - 【大公司】 / 大公司
+    以“下一个类似标题”作为终止
+    """
+    if not text:
+        return []
 
-    def is_section_header_p(p: Tag) -> Optional[str]:
-        strong = p.find("strong")
-        if strong:
-            sec = _normalize_section_name(strong.get_text(" "))
-            if sec:
-                return sec
-        txt = clean_text(p.get_text(" "))
-        m = re.search(r"【\s*([^】]+)\s*】", txt)
-        if m:
-            sec = _normalize_section_name(m.group(1))
-            if sec:
-                return sec
-        return None
+    # 标题可能有各种括号/空格
+    # 构造一个能匹配“观国内”这一类标题行的正则
+    head_pat = re.compile(rf"^\s*[【\[]?\s*{re.escape(section)}\s*[】\]]?\s*$", re.M)
 
-    def is_any_header_p(p: Tag) -> bool:
-        strong = p.find("strong")
-        if strong:
-            return bool(clean_text(strong.get_text(" ")))
-        txt = clean_text(p.get_text(" "))
-        return bool(re.match(r"^【.+】$", txt))
+    m = head_pat.search(text)
+    if not m:
+        return []
 
-    for p in ps:
-        sec = is_section_header_p(p)
-        if sec:
-            current_section = sec
+    start = m.end()
+
+    # 终止点：下一个形如 “【xxx】” 或 单独一行短标题（比如 今日推荐/观国际/大公司 等）
+    tail_pat = re.compile(r"^\s*[【\[]?\s*[\u4e00-\u9fff]{2,6}\s*[】\]]?\s*$", re.M)
+    m2 = tail_pat.search(text, start)
+    end = m2.start() if m2 else len(text)
+
+    chunk = text[start:end].strip()
+    if not chunk:
+        return []
+
+    # 拆行、清洗
+    lines = [clean_text(x) for x in chunk.split("\n")]
+    lines = [x for x in lines if len(x) >= 10]
+
+    # 去重
+    out = []
+    seen = set()
+    for x in lines:
+        if x in seen:
             continue
+        seen.add(x)
+        out.append(x)
+    return out
 
-        if not current_section:
-            continue
 
-        # 遇到新的标题（哪怕不是我们关心的），停止收集
-        if is_any_header_p(p) and is_section_header_p(p) is None:
-            current_section = None
-            continue
+def extract_sections(html: str) -> Dict[str, List[str]]:
+    text = html_to_plain_text(html)
 
-        txt = clean_text(p.get_text(" "))
-        if not txt:
-            continue
-        if "点击" in txt and "听新闻" in txt:
-            continue
-
-        result[current_section].append(txt)
-
-    # 清洗：去重 + 去掉太短
-    for k in list(result.keys()):
-        cleaned = []
-        seen = set()
-        for x in result[k]:
-            x = clean_text(x)
-            if len(x) < 10:
-                continue
-            if x in seen:
-                continue
-            seen.add(x)
-            cleaned.append(x)
-        result[k] = cleaned
-
+    result = {}
+    for sec in SECTION_ALLOW:
+        result[sec] = slice_section(text, sec)
     return result
 
 
-# =========================
-# 钉钉推送
-# =========================
 def dingtalk_sign(timestamp_ms: str, secret: str) -> str:
     string_to_sign = f"{timestamp_ms}\n{secret}"
     h = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
@@ -275,9 +236,6 @@ def dingtalk_send_markdown(title: str, markdown: str):
     r.raise_for_status()
 
 
-# =========================
-# 主流程
-# =========================
 def main():
     sent = load_sent_links()
 
@@ -290,7 +248,7 @@ def main():
 
     picked = []
     for it in candidates:
-        sections = extract_sections_from_description(it.get("description_html", ""))
+        sections = extract_sections(it.get("html", ""))
 
         if not any(sections.get(k) for k in SECTION_ALLOW):
             continue
@@ -306,28 +264,27 @@ def main():
             break
 
     if not picked:
-        print("新条目里没有解析到【观国内】/【大公司】内容。")
+        print("新条目没有解析到【观国内】/【大公司】内容。")
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
-    md_lines = [f"### 📰 一财早报（{today}）— 只看【观国内 / 大公司】", ""]
+    md = [f"### 📰 一财早报（{today}）— 只看【观国内 / 大公司】", ""]
 
-    for idx, x in enumerate(picked, 1):
-        md_lines.append(f"{idx}. **[{x['title']}]({x['url']})**")
+    for i, x in enumerate(picked, 1):
+        md.append(f"{i}. **[{x['title']}]({x['url']})**")
         if x.get("published"):
-            md_lines.append(f"   - 时间：{x['published']}")
+            md.append(f"   - 时间：{x['published']}")
 
         for sec in SECTION_ALLOW:
             items = x["sections"].get(sec, [])
             if not items:
                 continue
-            md_lines.append(f"   - ****")
+            md.append(f"   - ****")
             for j, t in enumerate(items[:8], 1):
-                md_lines.append(f"     {j}) {t}")
+                md.append(f"     {j}) {t}")
+        md.append("")
 
-        md_lines.append("")
-
-    markdown = "\n".join(md_lines).strip()
+    markdown = "\n".join(md).strip()
     dingtalk_send_markdown(f"一财早报精选 {today}", markdown)
 
     for x in picked:
