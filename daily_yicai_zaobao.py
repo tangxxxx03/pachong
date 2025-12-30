@@ -1,118 +1,109 @@
 # -*- coding: utf-8 -*-
 """
-一财早报 · 今日标题速览（仅标题）
-
+一财早报（只看【观国内 / 大公司】）
 规则：
-1. 只抓 RSS 中“今天”的条目
-2. 只发送标题 + 链接
-3. 不解析正文、不分栏目
-4. 今天没新内容 → 安静退出
+1. 只抓 RSS
+2. 只抓今天（Asia/Shanghai）
+3. 只发标题 + 原文链接
+4. 不解析正文、不用 description
 """
 
 import os
-import time
-import hmac
-import base64
-import hashlib
-import urllib.parse
-from datetime import datetime, timezone
 import requests
 import feedparser
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 # ========= 配置 =========
-RSS_URLS = [
+RSS_BASES = [
     "https://rsshub.app/yicai/feed/669",
     "https://rsshub.rssforever.com/yicai/feed/669",
 ]
 
-UA = "Mozilla/5.0"
-TIMEOUT = 20
-TOP_N = 10
+TZ = ZoneInfo("Asia/Shanghai")
 
-# ========= 钉钉 =========
-def sign(timestamp, secret):
-    string_to_sign = f"{timestamp}\n{secret}"
-    h = hmac.new(
-        secret.encode("utf-8"),
-        string_to_sign.encode("utf-8"),
-        hashlib.sha256
-    ).digest()
-    return urllib.parse.quote_plus(base64.b64encode(h))
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET")
 
-def send_dingtalk(markdown):
-    webhook = os.getenv("DINGTALK_WEBHOOK")
-    secret = os.getenv("DINGTALK_SECRET")
+KEYWORDS = ["观国内", "大公司"]
 
-    if not webhook:
-        raise RuntimeError("缺少 DINGTALK_WEBHOOK")
 
-    url = webhook
-    if secret:
-        ts = str(int(time.time() * 1000))
-        url += f"&timestamp={ts}&sign={sign(ts, secret)}"
+# ========= 工具函数 =========
+def today_date_cn():
+    return datetime.now(TZ).date()
+
+
+def is_today(pub_struct):
+    """判断 RSS 条目是否为今天"""
+    if not pub_struct:
+        return False
+    pub_dt = datetime(*pub_struct[:6], tzinfo=timezone.utc).astimezone(TZ)
+    return pub_dt.date() == today_date_cn()
+
+
+def match_keywords(title):
+    return any(k in title for k in KEYWORDS)
+
+
+def fetch_rss_items():
+    for base in RSS_BASES:
+        try:
+            feed = feedparser.parse(base)
+            if feed.entries:
+                print(f"[RSS] ok via {base}, entries={len(feed.entries)}")
+                return feed.entries
+        except Exception as e:
+            print(f"[RSS] fail {base}: {e}")
+    return []
+
+
+def send_to_dingtalk(text):
+    if not DINGTALK_WEBHOOK:
+        print("⚠️ 未配置钉钉 Webhook")
+        return
 
     payload = {
         "msgtype": "markdown",
         "markdown": {
-            "title": "一财早报 · 今日标题",
-            "text": markdown
+            "title": "一财早报",
+            "text": text
         }
     }
 
-    r = requests.post(url, json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
+    resp = requests.post(DINGTALK_WEBHOOK, json=payload, timeout=10)
+    resp.raise_for_status()
 
-# ========= 核心 =========
-def is_today(entry):
-    if not getattr(entry, "published_parsed", None):
-        return False
 
-    published = datetime.fromtimestamp(
-        time.mktime(entry.published_parsed),
-        tz=timezone.utc
-    )
-
-    return published.date() == datetime.now(timezone.utc).date()
-
-def fetch_today_titles():
-    for url in RSS_URLS:
-        try:
-            r = requests.get(url, headers={"User-Agent": UA}, timeout=TIMEOUT)
-            r.raise_for_status()
-
-            feed = feedparser.parse(r.content)
-            titles = []
-
-            for e in feed.entries:
-                if is_today(e):
-                    titles.append({
-                        "title": e.title.strip(),
-                        "link": e.link.strip()
-                    })
-
-            if titles:
-                return titles[:TOP_N]
-
-        except Exception as e:
-            print(f"[RSS] fail via {url}: {e}")
-
-    return []
-
+# ========= 主流程 =========
 def main():
-    items = fetch_today_titles()
+    entries = fetch_rss_items()
 
-    if not items:
-        print("今天没有一财早报新标题，不推送。")
+    today_items = []
+
+    for e in entries:
+        title = e.get("title", "").strip()
+        link = e.get("link", "")
+        pub = e.get("published_parsed")
+
+        if not title or not link:
+            continue
+        if not is_today(pub):
+            continue
+        if not match_keywords(title):
+            continue
+
+        today_items.append(f"- [{title}]({link})")
+
+    if not today_items:
+        print("今天没有【观国内 / 大公司】标题")
         return
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    lines = [f"### 📰 一财早报 · {today}（仅标题）", ""]
+    header = f"📰 一财早报（{today_date_cn()}）— 只看【观国内 / 大公司】\n\n"
+    body = "\n".join(today_items)
 
-    for i, it in enumerate(items, 1):
-        lines.append(f"{i}. [{it['title']}]({it['link']})")
+    send_to_dingtalk(header + body)
+    print(f"已发送 {len(today_items)} 条标题")
 
-    send_dingtalk("\n".join(lines))
-    print(f"已推送 {len(items)} 条标题。")
 
 if __name__ == "__main__":
     main()
