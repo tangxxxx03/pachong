@@ -47,28 +47,55 @@ def fetch_feed():
     return None
 
 
-def extract_numbered_titles(description):
+def get_entry_content(entry):
     """
-    从描述文本中提取带编号的标题。
+    优先获取 RSS 的全文内容 (content)，如果不存在则获取摘要 (description/summary)
     """
-    if not description:
+    # 1. 尝试获取 content 字段 (通常是列表)
+    if hasattr(entry, 'content'):
+        # content 是一个 list，通常第一项是全文
+        for c in entry.content:
+            if c.get('value'):
+                return c.get('value')
+    
+    # 2. 尝试获取 summary_detail 或 summary
+    if hasattr(entry, 'summary_detail'):
+        return entry.summary_detail.get('value', '')
+        
+    # 3. 回退到 description
+    return entry.get('description', '')
+
+
+def extract_numbered_titles(html_content):
+    """
+    从 HTML 文本中提取带编号的标题。
+    """
+    if not html_content:
         return []
 
-    text = unescape(description)
+    text = unescape(html_content)
     
-    # 替换 HTML 换行符
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    # === 预处理 HTML 标签以保留换行结构 ===
+    # 将 <br>, </p>, </div> 替换为换行符
+    text = re.sub(r"<(br|p|div)[^>]*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(p|div)>", "\n", text, flags=re.IGNORECASE)
     
-    # 移除 HTML 标签
+    # 移除剩余的所有 HTML 标签
     text = re.sub(r"<[^>]+>", "", text)
 
     titles = []
+    # 遍历每一行进行正则匹配
     for line in text.splitlines():
         line = line.strip()
-        # 匹配 "1. xxx" 或 "1、xxx"
-        if re.match(r"^\d+[\.、]\s*.+", line):
-            clean_title = re.sub(r"^\d+[\.、]\s*", "", line)
+        # 匹配逻辑：
+        # ^\s* : 行首允许有空白
+        # \d+        : 数字
+        # [\.、]     : 点号或顿号
+        # \s* : 可能的空白
+        # .+         : 标题内容
+        if re.match(r"^\s*\d+[\.、]\s*.+", line):
+            # 清理掉前面的编号，只保留文字
+            clean_title = re.sub(r"^\s*\d+[\.、]\s*", "", line)
             titles.append(clean_title)
 
     return titles
@@ -86,42 +113,46 @@ def parse_zaobao_titles(entries):
     # 1. 优先寻找标题里带有 "早报" 且是今天的文章
     for e in entries:
         title = e.get("title", "No Title")
-        
         if not hasattr(e, "published_parsed") or not e.published_parsed:
             continue
         
-        # 时间转换
         dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
         dt_cn = dt_utc.astimezone(TZ_CN)
-        pub_date_cn = dt_cn.date()
+        
+        if dt_cn.date() == today_cn and "早报" in title:
+            print(f"DEBUG: Found 'ZaoBao' article (Today): [{title}]")
+            target_entry = e
+            break
 
-        # 检查是否是今天
-        if pub_date_cn == today_cn:
-            # 检查标题关键字
-            if "早报" in title:
-                print(f"DEBUG: Found 'ZaoBao' article: [{title}]")
-                target_entry = e
-                break # 找到了就停止
-            else:
-                # 记录一下找到了别的文章，方便调试
-                print(f"DEBUG: Skipped regular news: [{title}]")
-
-    # 2. 如果今天没找到带“早报”的，尝试回退一天（防止时区边缘或发布延迟）
+    # 2. 如果今天没找到，尝试回退一天
     if not target_entry:
         print("DEBUG: No 'ZaoBao' found for today, checking yesterday...")
         yesterday_cn = today_cn - timedelta(days=1)
         for e in entries:
             title = e.get("title", "")
-            if "早报" in title:
-                dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                if dt_utc.astimezone(TZ_CN).date() == yesterday_cn:
-                    print(f"DEBUG: Found yesterday's 'ZaoBao' instead: [{title}]")
-                    target_entry = e
-                    break
+            if not hasattr(e, "published_parsed") or not e.published_parsed:
+                continue
+                
+            dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
+            if dt_utc.astimezone(TZ_CN).date() == yesterday_cn and "早报" in title:
+                print(f"DEBUG: Found 'ZaoBao' article (Yesterday): [{title}]")
+                target_entry = e
+                break
 
-    # 3. 开始解析
+    # 3. 开始解析内容
     if target_entry:
-        return extract_numbered_titles(target_entry.get("description", ""))
+        # 获取最佳内容源
+        raw_content = get_entry_content(target_entry)
+        results = extract_numbered_titles(raw_content)
+        
+        if results:
+            return results
+        else:
+            # === 关键调试信息 ===
+            print(f"DEBUG: Extraction failed. Preview of raw content (first 500 chars):")
+            clean_preview = re.sub(r"<[^>]+>", "", raw_content)[:500]
+            print(f"--- START RAW PREVIEW ---\n{clean_preview}\n--- END RAW PREVIEW ---")
+            return []
     else:
         print("DEBUG: No 'ZaoBao' article found in recent feed.")
         return []
@@ -164,7 +195,7 @@ def main():
     titles = parse_zaobao_titles(feed.entries)
     
     if not titles:
-        print("Error: Could not extract points from ZaoBao.")
+        print("Error: Could not extract points. See DEBUG logs above.")
         return
 
     # 生成最终文案
