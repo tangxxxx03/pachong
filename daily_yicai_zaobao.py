@@ -11,13 +11,18 @@ from html import unescape
 from datetime import datetime, timezone, timedelta
 
 # ================= 配置部分 =================
+# 增加了多个公共镜像源，防止单点故障
 RSS_URLS = [
-    "https://rsshb.app/yicai/feed/669",
     "https://rsshub.rssforever.com/yicai/feed/669",
+    "https://rss.imgony.com/yicai/feed/669",
+    "https://rsshub.ktachibana.party/yicai/feed/669",
+    "https://rss.shab.fun/yicai/feed/669",
+    "https://rsshub.app/yicai/feed/669",
 ]
 
 UA = "Mozilla/5.0 (GitHubActions)"
-TIMEOUT = 30
+# 延长超时时间到 45 秒，应对拥堵的节点
+TIMEOUT = 45 
 
 # 定义北京时区 (UTC+8)
 TZ_CN = timezone(timedelta(hours=8))
@@ -30,9 +35,14 @@ def fetch_feed():
             r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
             r.raise_for_status()
             feed = feedparser.parse(r.text)
+            
+            # 简单校验一下是否真的解析到了内容
             if feed.entries:
                 print(f"[RSS] Success via {url}, entries count: {len(feed.entries)}")
                 return feed
+            else:
+                print(f"[RSS] Parsed empty content via {url}, trying next...")
+                
         except Exception as e:
             print(f"[RSS] Failed: {url} -> {e}")
 
@@ -86,7 +96,6 @@ def parse_today_titles(entries):
         title = e.get("title", "No Title")
         
         if not hasattr(e, "published_parsed") or not e.published_parsed:
-            print(f"DEBUG: Skip '{title}' (No date info)")
             continue
         
         # 时间转换
@@ -94,13 +103,11 @@ def parse_today_titles(entries):
         dt_cn = dt_utc.astimezone(TZ_CN)
         pub_date_cn = dt_cn.date()
 
-        # 只要是今天发布的，或者是昨晚发布的（针对早报可能提前出的情况，放宽一天范围也可以，这里先严格匹配今天）
+        # 只要是今天发布的
         if pub_date_cn != today_cn:
             continue
 
         found_any_today = True
-        
-        # 调试日志：打印今天找到的文章标题
         print(f"DEBUG: Found today's item: [{title}]")
 
         # 尝试提取
@@ -110,7 +117,6 @@ def parse_today_titles(entries):
             print(f"  -> Extracted {len(extracted)} points from this item.")
             results.extend(extracted)
         else:
-            # 如果标题里包含“早报”，但没提取到内容，打印一下原始内容的前100字，方便排查
             if "早报" in title:
                 print(f"  -> WARNING: This looks like ZaoBao but regex failed.")
                 raw_preview = re.sub(r"<[^>]+>", "", unescape(e.get("description", "")))[:100]
@@ -134,7 +140,6 @@ def send_dingtalk(text):
 
     if not webhook or not secret:
         print("DingTalk not configured, skip send")
-        # print(f"Content would be:\n{text}")
         return
 
     ts = str(round(time.time() * 1000))
