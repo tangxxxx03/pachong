@@ -11,7 +11,6 @@ from html import unescape
 from datetime import datetime, timezone, timedelta
 
 # ================= 配置部分 =================
-# 增加了多个公共镜像源，防止单点故障
 RSS_URLS = [
     "https://rsshub.rssforever.com/yicai/feed/669",
     "https://rss.imgony.com/yicai/feed/669",
@@ -21,7 +20,6 @@ RSS_URLS = [
 ]
 
 UA = "Mozilla/5.0 (GitHubActions)"
-# 延长超时时间到 45 秒，应对拥堵的节点
 TIMEOUT = 45 
 
 # 定义北京时区 (UTC+8)
@@ -36,7 +34,6 @@ def fetch_feed():
             r.raise_for_status()
             feed = feedparser.parse(r.text)
             
-            # 简单校验一下是否真的解析到了内容
             if feed.entries:
                 print(f"[RSS] Success via {url}, entries count: {len(feed.entries)}")
                 return feed
@@ -53,46 +50,41 @@ def fetch_feed():
 def extract_numbered_titles(description):
     """
     从描述文本中提取带编号的标题。
-    改进：先处理 HTML 换行，再提取文本。
     """
     if not description:
         return []
 
     text = unescape(description)
     
-    # 关键修复：将 HTML 的换行标签替换为实际换行符，防止文字粘连
+    # 替换 HTML 换行符
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     
-    # 移除剩余的所有 HTML 标签
+    # 移除 HTML 标签
     text = re.sub(r"<[^>]+>", "", text)
 
     titles = []
-    # 遍历每一行进行正则匹配
     for line in text.splitlines():
         line = line.strip()
         # 匹配 "1. xxx" 或 "1、xxx"
         if re.match(r"^\d+[\.、]\s*.+", line):
-            # 去掉开头的数字和符号
             clean_title = re.sub(r"^\d+[\.、]\s*", "", line)
             titles.append(clean_title)
 
     return titles
 
 
-def parse_today_titles(entries):
+def parse_zaobao_titles(entries):
     """
-    解析属于【北京时间今天】的新闻条目
+    精准查找【今天】发布的、且标题包含【早报】的文章
     """
     today_cn = datetime.now(TZ_CN).date()
-    results = []
-
     print(f"DEBUG: Target Date (Beijing) = {today_cn}")
 
-    found_any_today = False
+    target_entry = None
 
+    # 1. 优先寻找标题里带有 "早报" 且是今天的文章
     for e in entries:
-        # 安全获取标题
         title = e.get("title", "No Title")
         
         if not hasattr(e, "published_parsed") or not e.published_parsed:
@@ -103,29 +95,36 @@ def parse_today_titles(entries):
         dt_cn = dt_utc.astimezone(TZ_CN)
         pub_date_cn = dt_cn.date()
 
-        # 只要是今天发布的
-        if pub_date_cn != today_cn:
-            continue
-
-        found_any_today = True
-        print(f"DEBUG: Found today's item: [{title}]")
-
-        # 尝试提取
-        extracted = extract_numbered_titles(e.get("description", ""))
-        
-        if extracted:
-            print(f"  -> Extracted {len(extracted)} points from this item.")
-            results.extend(extracted)
-        else:
+        # 检查是否是今天
+        if pub_date_cn == today_cn:
+            # 检查标题关键字
             if "早报" in title:
-                print(f"  -> WARNING: This looks like ZaoBao but regex failed.")
-                raw_preview = re.sub(r"<[^>]+>", "", unescape(e.get("description", "")))[:100]
-                print(f"  -> Content preview: {raw_preview}...")
+                print(f"DEBUG: Found 'ZaoBao' article: [{title}]")
+                target_entry = e
+                break # 找到了就停止
+            else:
+                # 记录一下找到了别的文章，方便调试
+                print(f"DEBUG: Skipped regular news: [{title}]")
 
-    if not found_any_today:
-        print("DEBUG: No articles found for today's date.")
+    # 2. 如果今天没找到带“早报”的，尝试回退一天（防止时区边缘或发布延迟）
+    if not target_entry:
+        print("DEBUG: No 'ZaoBao' found for today, checking yesterday...")
+        yesterday_cn = today_cn - timedelta(days=1)
+        for e in entries:
+            title = e.get("title", "")
+            if "早报" in title:
+                dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
+                if dt_utc.astimezone(TZ_CN).date() == yesterday_cn:
+                    print(f"DEBUG: Found yesterday's 'ZaoBao' instead: [{title}]")
+                    target_entry = e
+                    break
 
-    return results
+    # 3. 开始解析
+    if target_entry:
+        return extract_numbered_titles(target_entry.get("description", ""))
+    else:
+        print("DEBUG: No 'ZaoBao' article found in recent feed.")
+        return []
 
 
 def sign(timestamp, secret):
@@ -162,10 +161,10 @@ def main():
     if not feed:
         return
 
-    titles = parse_today_titles(feed.entries)
+    titles = parse_zaobao_titles(feed.entries)
     
     if not titles:
-        print("Error: No valid titles extracted. Check the DEBUG logs above.")
+        print("Error: Could not extract points from ZaoBao.")
         return
 
     # 生成最终文案
