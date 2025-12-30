@@ -27,14 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 feedparser
 
+      - name: Prepare data files
+        run: |
+          mkdir -p data
+          if [ ! -f data/sent_links.json ]; then echo "[]" > data/sent_links.json; fi
+
       - name: Run YiCai ZaoBao RSS script
         env:
           DINGTALK_WEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
-
-          # 可选：你可以在 Secrets 里配置 RSSHUB_BASES
           RSSHUB_BASES: ${{ secrets.RSSHUB_BASES }}
-
           TOP_N: "8"
         run: |
           python daily_yicai_zaobao.py
