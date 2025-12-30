@@ -16,7 +16,7 @@ RSS_URLS = [
 ]
 
 UA = "Mozilla/5.0 (GitHubActions)"
-TIMEOUT = 15
+TIMEOUT = 20
 
 
 def fetch_feed():
@@ -30,15 +30,12 @@ def fetch_feed():
                 return feed
         except Exception as e:
             print(f"[RSS] failed: {url} -> {e}")
-    raise RuntimeError("All RSS failed")
+
+    print("[RSS] all sources unavailable, skip today")
+    return None
 
 
 def extract_numbered_titles(description):
-    """
-    从 description 中提取：
-    1. xxx
-    2. xxx
-    """
     if not description:
         return []
 
@@ -49,8 +46,7 @@ def extract_numbered_titles(description):
     for line in text.splitlines():
         line = line.strip()
         if re.match(r"^\d+\.?\s+.+", line):
-            title = re.sub(r"^\d+\.?\s+", "", line)
-            titles.append(title)
+            titles.append(re.sub(r"^\d+\.?\s+", "", line))
 
     return titles
 
@@ -81,8 +77,9 @@ def sign(timestamp, secret):
 def send_dingtalk(text):
     webhook = os.getenv("DINGTALK_WEBHOOK")
     secret = os.getenv("DINGTALK_SECRET")
+
     if not webhook or not secret:
-        print("No DingTalk config")
+        print("DingTalk not configured, skip send")
         return
 
     ts = str(round(time.time() * 1000))
@@ -93,15 +90,20 @@ def send_dingtalk(text):
         "text": {"content": text}
     }
 
-    requests.post(url, json=payload).raise_for_status()
+    try:
+        requests.post(url, json=payload, timeout=10).raise_for_status()
+    except Exception as e:
+        print(f"DingTalk send failed: {e}")
 
 
 def main():
     feed = fetch_feed()
-    titles = parse_today_titles(feed.entries)
+    if not feed:
+        return
 
+    titles = parse_today_titles(feed.entries)
     if not titles:
-        print("今天 RSS 中没有可用标题")
+        print("今天 RSS 有数据，但没有可用标题")
         return
 
     today = datetime.now().strftime("%Y-%m-%d")
