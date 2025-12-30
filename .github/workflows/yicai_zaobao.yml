@@ -2,17 +2,20 @@ name: Daily YiCai ZaoBao (RSS Only)
 
 on:
   schedule:
-    # 北京时间 09:05 = UTC 01:05
-    - cron: "5 1 * * *"
+    - cron: "5 1 * * *"   # 北京时间 09:05
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,11 +29,12 @@ jobs:
 
       - name: Run YiCai ZaoBao RSS script
         env:
-          # 钉钉（必填）
           DINGTALK_WEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
 
-          # 可选：每天推送条数
+          # 可选：你可以在 Secrets 里配置 RSSHUB_BASES
+          RSSHUB_BASES: ${{ secrets.RSSHUB_BASES }}
+
           TOP_N: "8"
         run: |
           python daily_yicai_zaobao.py
