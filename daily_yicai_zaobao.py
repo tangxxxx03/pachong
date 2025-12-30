@@ -10,8 +10,10 @@ import feedparser
 from html import unescape
 from datetime import datetime, timezone, timedelta
 
+from bs4 import BeautifulSoup  # ✅ 新增：更稳的 HTML -> 文本解析
+
+
 # ================= 配置部分 =================
-# 更新了镜像源列表，去掉了一些不稳定的，加入了一些新的
 RSS_URLS = [
     "https://rsshub.app/yicai/feed/669",             # 官方源
     "https://rss.fatpandac.com/yicai/feed/669",      # 备用镜像 1
@@ -21,35 +23,31 @@ RSS_URLS = [
     "https://rsshub.rssforever.com/yicai/feed/669",  # 备用镜像 5
 ]
 
-# 关键修改：伪装成 Windows 下的 Chrome 浏览器，防止被 403 拦截
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+TIMEOUT = 30
 
-TIMEOUT = 30 
-
-# 定义北京时区 (UTC+8)
 TZ_CN = timezone(timedelta(hours=8))
 # ===========================================
+
 
 def fetch_feed():
     for url in RSS_URLS:
         try:
             print(f"Trying to fetch: {url}")
-            # 使用伪装的 UA 发送请求
             r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
             r.raise_for_status()
-            
-            # 增加一步：检查返回的内容是否真的是 XML
+
             if "xml" not in r.headers.get("Content-Type", "").lower() and not r.text.strip().startswith("<?xml"):
                 print(f"[RSS] Warning: Response via {url} might not be XML. Content-Type: {r.headers.get('Content-Type')}")
-            
+
             feed = feedparser.parse(r.text)
-            
+
             if feed.entries:
                 print(f"[RSS] Success via {url}, entries count: {len(feed.entries)}")
                 return feed
             else:
                 print(f"[RSS] Parsed empty content via {url}, trying next...")
-                
+
         except Exception as e:
             print(f"[RSS] Failed: {url} -> {e}")
 
@@ -61,40 +59,89 @@ def get_entry_content(entry):
     """
     优先获取 RSS 的全文内容 (content)，如果不存在则获取摘要 (description/summary)
     """
-    if hasattr(entry, 'content'):
+    if hasattr(entry, "content"):
         for c in entry.content:
-            if c.get('value'):
-                return c.get('value')
-    
-    if hasattr(entry, 'summary_detail'):
-        return entry.summary_detail.get('value', '')
-        
-    return entry.get('description', '')
+            if c.get("value"):
+                return c.get("value")
+
+    if hasattr(entry, "summary_detail"):
+        return entry.summary_detail.get("value", "")
+
+    return entry.get("description", "")
+
+
+def html_to_text_keep_lines(html_content: str) -> str:
+    """
+    用 BeautifulSoup 把 HTML 变成“尽量保留换行结构”的纯文本。
+    """
+    if not html_content:
+        return ""
+
+    html_content = unescape(html_content)
+
+    # 有些 feedparser 会把内容塞进 CDATA，里头还是 HTML
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # separator="\n" 是关键：把块级元素/换行点都变成真实换行
+    text = soup.get_text(separator="\n")
+
+    # 统一空白：把 NBSP、全角空格等处理掉
+    text = text.replace("\xa0", " ").replace("\u3000", " ")
+
+    # 压缩多余空行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def extract_numbered_titles(html_content):
     """
-    从 HTML 文本中提取带编号的标题。
+    从 HTML/文本中提取编号要点。
+    支持：1. / 1、 / 1． / 1) / 1） 以及前面带 • ○ - 等符号
+    不依赖必须“行首”，用全局 finditer 更稳。
     """
     if not html_content:
         return []
 
-    text = unescape(html_content)
-    
-    # 预处理 HTML 标签以保留换行结构
-    text = re.sub(r"<(br|p|div)[^>]*>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</(p|div)>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
+    text = html_to_text_keep_lines(html_content)
+
+    # 再做一次轻度清洗，避免“编号粘连”
+    # 常见情况：多个要点在同一行，用空格隔开或符号隔开
+    # 我们先把明显分隔符也换成换行，提升识别率
+    text2 = text
+    text2 = re.sub(r"[•○●◆◇■]\s*", "\n", text2)  # 符号当分隔
+    text2 = re.sub(r"\s{2,}", " ", text2)
+
+    # ✅ 全局匹配编号
+    # - 开头可能是换行或行首
+    # - 编号 1~2 位（足够覆盖早报条数）
+    # - 分隔符：. 、 ． ) ）
+    pattern = re.compile(r"(?:^|\n)\s*(?:[-–—]*)\s*(\d{1,2})\s*([\.、．\)\）])\s*(.+?)\s*(?=\n|$)")
 
     titles = []
-    for line in text.splitlines():
-        line = line.strip()
-        # 匹配 "1. xxx" 或 "1、xxx"
-        if re.match(r"^\s*\d+[\.、]\s*.+", line):
-            clean_title = re.sub(r"^\s*\d+[\.、]\s*", "", line)
-            titles.append(clean_title)
+    for m in pattern.finditer(text2):
+        item = m.group(3).strip()
+        # 避免把“时间/来源”这种也抓进来：太短或像日期就过滤
+        if len(item) < 4:
+            continue
+        titles.append(item)
 
-    return titles
+    # 如果还没抓到，做一次“超级兜底”：不要求换行边界
+    if not titles:
+        pattern2 = re.compile(r"\b(\d{1,2})\s*([\.、．\)\）])\s*([^\n]{4,80})")
+        for m in pattern2.finditer(text):
+            item = m.group(3).strip()
+            if len(item) < 4:
+                continue
+            titles.append(item)
+
+    # 去重（保持顺序）
+    seen = set()
+    uniq = []
+    for t in titles:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
 
 
 def parse_zaobao_titles(entries):
@@ -111,10 +158,10 @@ def parse_zaobao_titles(entries):
         title = e.get("title", "No Title")
         if not hasattr(e, "published_parsed") or not e.published_parsed:
             continue
-        
+
         dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
         dt_cn = dt_utc.astimezone(TZ_CN)
-        
+
         if dt_cn.date() == today_cn and "早报" in title:
             print(f"DEBUG: Found 'ZaoBao' article (Today): [{title}]")
             target_entry = e
@@ -128,7 +175,7 @@ def parse_zaobao_titles(entries):
             title = e.get("title", "")
             if not hasattr(e, "published_parsed") or not e.published_parsed:
                 continue
-                
+
             dt_utc = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
             if dt_utc.astimezone(TZ_CN).date() == yesterday_cn and "早报" in title:
                 print(f"DEBUG: Found 'ZaoBao' article (Yesterday): [{title}]")
@@ -139,13 +186,15 @@ def parse_zaobao_titles(entries):
     if target_entry:
         raw_content = get_entry_content(target_entry)
         results = extract_numbered_titles(raw_content)
-        
+
         if results:
             return results
         else:
-            print(f"DEBUG: Extraction failed. Preview of raw content (first 500 chars):")
-            clean_preview = re.sub(r"<[^>]+>", "", raw_content)[:500]
-            print(f"--- START RAW PREVIEW ---\n{clean_preview}\n--- END RAW PREVIEW ---")
+            print("DEBUG: Extraction failed.")
+            print("DEBUG: raw_content repr preview (first 800 chars):")
+            print(repr(raw_content[:800]))
+            print("DEBUG: text preview after soup (first 800 chars):")
+            print(html_to_text_keep_lines(raw_content)[:800])
             return []
     else:
         print("DEBUG: No 'ZaoBao' article found in recent feed.")
@@ -187,7 +236,7 @@ def main():
         return
 
     titles = parse_zaobao_titles(feed.entries)
-    
+
     if not titles:
         print("Error: Could not extract points. See DEBUG logs above.")
         return
