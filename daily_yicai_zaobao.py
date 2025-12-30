@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
+import os
 import re
 import time
 import hmac
-import json
 import base64
 import hashlib
 import requests
@@ -10,38 +10,19 @@ import feedparser
 from html import unescape
 from datetime import datetime, timezone
 
-# ======================
-# 配置
-# ======================
-
 RSS_URLS = [
     "https://rsshb.app/yicai/feed/669",
     "https://rsshub.rssforever.com/yicai/feed/669",
 ]
 
-FETCH_TIMEOUT = 15
 UA = "Mozilla/5.0 (GitHubActions)"
-
-DINGTALK_WEBHOOK = None
-DINGTALK_SECRET = None
+TIMEOUT = 15
 
 
-# ======================
-# 工具函数
-# ======================
-
-def safe_get(url):
-    return requests.get(
-        url,
-        timeout=FETCH_TIMEOUT,
-        headers={"User-Agent": UA},
-    )
-
-
-def fetch_rss_feed():
+def fetch_feed():
     for url in RSS_URLS:
         try:
-            r = safe_get(url)
+            r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
             r.raise_for_status()
             feed = feedparser.parse(r.text)
             if feed.entries:
@@ -49,150 +30,88 @@ def fetch_rss_feed():
                 return feed
         except Exception as e:
             print(f"[RSS] failed: {url} -> {e}")
-    raise RuntimeError("All RSS sources failed")
+    raise RuntimeError("All RSS failed")
 
 
-# ======================
-# 核心解析逻辑
-# ======================
-
-def extract_titles_from_description(description_html):
+def extract_numbered_titles(description):
     """
-    只从 description 中提取：
-    【观国内】、【大公司】里的标题
+    从 description 中提取：
+    1. xxx
+    2. xxx
     """
-    if not description_html:
-        return {}
+    if not description:
+        return []
 
-    text = unescape(description_html)
+    text = unescape(description)
     text = re.sub(r"<[^>]+>", "", text)
 
-    result = {}
+    titles = []
+    for line in text.splitlines():
+        line = line.strip()
+        if re.match(r"^\d+\.?\s+.+", line):
+            title = re.sub(r"^\d+\.?\s+", "", line)
+            titles.append(title)
 
-    for section in ["观国内", "大公司"]:
-        pattern = rf"【{section}】([\s\S]*?)(?=【|$)"
-        m = re.search(pattern, text)
-        if not m:
-            continue
-
-        block = m.group(1)
-        titles = []
-
-        for line in block.splitlines():
-            line = line.strip()
-            if re.match(r"^\d+\.?\s+.+", line):
-                title = re.sub(r"^\d+\.?\s+", "", line)
-                titles.append(title)
-
-        if titles:
-            result[section] = titles
-
-    return result
+    return titles
 
 
 def parse_today_titles(entries):
     today = datetime.now(timezone.utc).date()
+    results = []
 
-    collected = {
-        "观国内": [],
-        "大公司": []
-    }
-
-    for entry in entries:
-        if not hasattr(entry, "published_parsed"):
+    for e in entries:
+        if not hasattr(e, "published_parsed"):
             continue
 
-        pub_date = datetime(
-            *entry.published_parsed[:6],
-            tzinfo=timezone.utc
-        ).date()
-
+        pub_date = datetime(*e.published_parsed[:6], tzinfo=timezone.utc).date()
         if pub_date != today:
             continue
 
-        sections = extract_titles_from_description(
-            entry.get("description", "")
-        )
+        results.extend(extract_numbered_titles(e.get("description", "")))
 
-        for k in collected:
-            collected[k].extend(sections.get(k, []))
-
-    return collected
+    return results
 
 
-# ======================
-# 钉钉推送
-# ======================
-
-def sign_dingtalk(timestamp, secret):
+def sign(timestamp, secret):
     string_to_sign = f"{timestamp}\n{secret}"
-    hmac_code = hmac.new(
-        secret.encode("utf-8"),
-        string_to_sign.encode("utf-8"),
-        digestmod=hashlib.sha256
-    ).digest()
-    return base64.b64encode(hmac_code).decode("utf-8")
+    h = hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha256).digest()
+    return base64.b64encode(h).decode()
 
 
-def send_to_dingtalk(text):
-    if not DINGTALK_WEBHOOK or not DINGTALK_SECRET:
-        print("No DingTalk config, skip sending")
+def send_dingtalk(text):
+    webhook = os.getenv("DINGTALK_WEBHOOK")
+    secret = os.getenv("DINGTALK_SECRET")
+    if not webhook or not secret:
+        print("No DingTalk config")
         return
 
-    timestamp = str(round(time.time() * 1000))
-    sign = sign_dingtalk(timestamp, DINGTALK_SECRET)
-
-    url = (
-        f"{DINGTALK_WEBHOOK}"
-        f"&timestamp={timestamp}"
-        f"&sign={sign}"
-    )
+    ts = str(round(time.time() * 1000))
+    url = f"{webhook}&timestamp={ts}&sign={sign(ts, secret)}"
 
     payload = {
         "msgtype": "text",
-        "text": {
-            "content": text
-        }
+        "text": {"content": text}
     }
 
-    r = requests.post(url, json=payload)
-    r.raise_for_status()
+    requests.post(url, json=payload).raise_for_status()
 
-
-# ======================
-# 主流程
-# ======================
 
 def main():
-    global DINGTALK_WEBHOOK, DINGTALK_SECRET
+    feed = fetch_feed()
+    titles = parse_today_titles(feed.entries)
 
-    DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
-    DINGTALK_SECRET = os.getenv("DINGTALK_SECRET")
-
-    feed = fetch_rss_feed()
-    title_map = parse_today_titles(feed.entries)
-
-    if not title_map["观国内"] and not title_map["大公司"]:
-        print("今天没有【观国内 / 大公司】标题")
+    if not titles:
+        print("今天 RSS 中没有可用标题")
         return
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    lines = [f"📰 一财早报（{today}）— 要点速览\n"]
 
-    lines = []
-    lines.append(f"📰 一财早报（{today_str}）— 只看【观国内 / 大公司】\n")
+    for i, t in enumerate(titles, 1):
+        lines.append(f"{i}. {t}")
 
-    for section in ["观国内", "大公司"]:
-        if not title_map[section]:
-            continue
-        lines.append(f"【{section}】")
-        for i, t in enumerate(title_map[section], 1):
-            lines.append(f"{i}. {t}")
-        lines.append("")
-
-    message = "\n".join(lines).strip()
-    send_to_dingtalk(message)
+    send_dingtalk("\n".join(lines))
 
 
 if __name__ == "__main__":
-    import os
     main()
