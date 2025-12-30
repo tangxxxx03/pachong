@@ -1,124 +1,32 @@
-# -*- coding: utf-8 -*-
-"""
-一财早报 · 今日标题速览（只抓标题，不抓正文）
+name: YiCai ZaoBao
 
-规则：
-1. 仅抓取“今天”的 RSS 条目
-2. 只发送标题 + 链接
-3. 不解析正文、不分栏目
-4. 若今天无新条目 → 安静退出
-"""
+on:
+  workflow_dispatch:
+  # 如果你之后想定时，再打开下面这一段
+  # schedule:
+  #   - cron: '30 0 * * *'   # 每天 08:30 北京时间
 
-import os
-import time
-import hmac
-import json
-import base64
-import hashlib
-import urllib.parse
-from datetime import datetime, timezone
-import requests
-import feedparser
+jobs:
+  run:
+    runs-on: ubuntu-latest
 
-# ========== 配置 ==========
-RSS_URLS = [
-    "https://rsshub.app/yicai/feed/669",
-    "https://rsshub.rssforever.com/yicai/feed/669",
-]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-FETCH_TIMEOUT = 20
-UA = "Mozilla/5.0"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-TOP_N = 10
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests feedparser
 
-# ========== 钉钉 ==========
-def dingtalk_sign(timestamp, secret):
-    string_to_sign = f"{timestamp}\n{secret}"
-    hmac_code = hmac.new(
-        secret.encode("utf-8"),
-        string_to_sign.encode("utf-8"),
-        digestmod=hashlib.sha256
-    ).digest()
-    return urllib.parse.quote_plus(base64.b64encode(hmac_code))
-
-def send_dingtalk(markdown):
-    webhook = os.getenv("DINGTALK_WEBHOOK")
-    secret = os.getenv("DINGTALK_SECRET")
-
-    if not webhook:
-        raise RuntimeError("缺少 DINGTALK_WEBHOOK")
-
-    url = webhook
-    if secret:
-        ts = str(int(time.time() * 1000))
-        sign = dingtalk_sign(ts, secret)
-        url += f"&timestamp={ts}&sign={sign}"
-
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "title": "一财早报 · 今日标题",
-            "text": markdown
-        }
-    }
-
-    r = requests.post(url, json=payload, timeout=FETCH_TIMEOUT)
-    r.raise_for_status()
-
-# ========== 核心逻辑 ==========
-def is_today(entry):
-    """
-    RSS 时间 → 只保留今天（以北京时间）
-    """
-    if not hasattr(entry, "published_parsed") or not entry.published_parsed:
-        return False
-
-    published = datetime.fromtimestamp(
-        time.mktime(entry.published_parsed),
-        tz=timezone.utc
-    ).astimezone(timezone.utc)
-
-    today = datetime.now(timezone.utc).date()
-    return published.date() == today
-
-def fetch_today_titles():
-    for url in RSS_URLS:
-        try:
-            r = requests.get(url, headers={"User-Agent": UA}, timeout=FETCH_TIMEOUT)
-            r.raise_for_status()
-            feed = feedparser.parse(r.content)
-
-            items = []
-            for e in feed.entries:
-                if is_today(e):
-                    items.append({
-                        "title": e.title.strip(),
-                        "link": e.link.strip()
-                    })
-
-            if items:
-                return items[:TOP_N]
-
-        except Exception as e:
-            print(f"[RSS] fail via {url}: {e}")
-
-    return []
-
-def main():
-    items = fetch_today_titles()
-
-    if not items:
-        print("今天没有新的一财早报标题，跳过推送。")
-        return
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    lines = [f"### 📰 一财早报 · {today}（仅标题）", ""]
-
-    for i, it in enumerate(items, 1):
-        lines.append(f"{i}. [{it['title']}]({it['link']})")
-
-    send_dingtalk("\n".join(lines))
-    print(f"已推送 {len(items)} 条标题。")
-
-if __name__ == "__main__":
-    main()
+      - name: Run YiCai ZaoBao script
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
+        run: |
+          python daily_yicai_zaobao.py
