@@ -2,26 +2,24 @@ name: YiCai ZaoBao
 
 on:
   workflow_dispatch:
-  # 如果你之后想定时，再打开下面这一段
-  # schedule:
-  #   - cron: '30 0 * * *'   # 每天 08:30 北京时间
+  schedule:
+    - cron: "20 1 * * *"   # 北京时间 09:20
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install requests feedparser
 
       - name: Run YiCai ZaoBao script
