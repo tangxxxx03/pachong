@@ -11,16 +11,20 @@ from html import unescape
 from datetime import datetime, timezone, timedelta
 
 # ================= 配置部分 =================
+# 更新了镜像源列表，去掉了一些不稳定的，加入了一些新的
 RSS_URLS = [
-    "https://rsshub.rssforever.com/yicai/feed/669",
-    "https://rss.imgony.com/yicai/feed/669",
-    "https://rsshub.ktachibana.party/yicai/feed/669",
-    "https://rss.shab.fun/yicai/feed/669",
-    "https://rsshub.app/yicai/feed/669",
+    "https://rsshub.app/yicai/feed/669",             # 官方源
+    "https://rss.fatpandac.com/yicai/feed/669",      # 备用镜像 1
+    "https://rsshub.liujiacai.net/yicai/feed/669",   # 备用镜像 2
+    "https://rsshub.feedlib.xyz/yicai/feed/669",     # 备用镜像 3
+    "https://rss.project44.net/yicai/feed/669",      # 备用镜像 4
+    "https://rsshub.rssforever.com/yicai/feed/669",  # 备用镜像 5
 ]
 
-UA = "Mozilla/5.0 (GitHubActions)"
-TIMEOUT = 45 
+# 关键修改：伪装成 Windows 下的 Chrome 浏览器，防止被 403 拦截
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+TIMEOUT = 30 
 
 # 定义北京时区 (UTC+8)
 TZ_CN = timezone(timedelta(hours=8))
@@ -30,8 +34,14 @@ def fetch_feed():
     for url in RSS_URLS:
         try:
             print(f"Trying to fetch: {url}")
+            # 使用伪装的 UA 发送请求
             r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": UA})
             r.raise_for_status()
+            
+            # 增加一步：检查返回的内容是否真的是 XML
+            if "xml" not in r.headers.get("Content-Type", "").lower() and not r.text.strip().startswith("<?xml"):
+                print(f"[RSS] Warning: Response via {url} might not be XML. Content-Type: {r.headers.get('Content-Type')}")
+            
             feed = feedparser.parse(r.text)
             
             if feed.entries:
@@ -51,18 +61,14 @@ def get_entry_content(entry):
     """
     优先获取 RSS 的全文内容 (content)，如果不存在则获取摘要 (description/summary)
     """
-    # 1. 尝试获取 content 字段 (通常是列表)
     if hasattr(entry, 'content'):
-        # content 是一个 list，通常第一项是全文
         for c in entry.content:
             if c.get('value'):
                 return c.get('value')
     
-    # 2. 尝试获取 summary_detail 或 summary
     if hasattr(entry, 'summary_detail'):
         return entry.summary_detail.get('value', '')
         
-    # 3. 回退到 description
     return entry.get('description', '')
 
 
@@ -75,26 +81,16 @@ def extract_numbered_titles(html_content):
 
     text = unescape(html_content)
     
-    # === 预处理 HTML 标签以保留换行结构 ===
-    # 将 <br>, </p>, </div> 替换为换行符
+    # 预处理 HTML 标签以保留换行结构
     text = re.sub(r"<(br|p|div)[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</(p|div)>", "\n", text, flags=re.IGNORECASE)
-    
-    # 移除剩余的所有 HTML 标签
     text = re.sub(r"<[^>]+>", "", text)
 
     titles = []
-    # 遍历每一行进行正则匹配
     for line in text.splitlines():
         line = line.strip()
-        # 匹配逻辑：
-        # ^\s* : 行首允许有空白
-        # \d+        : 数字
-        # [\.、]     : 点号或顿号
-        # \s* : 可能的空白
-        # .+         : 标题内容
+        # 匹配 "1. xxx" 或 "1、xxx"
         if re.match(r"^\s*\d+[\.、]\s*.+", line):
-            # 清理掉前面的编号，只保留文字
             clean_title = re.sub(r"^\s*\d+[\.、]\s*", "", line)
             titles.append(clean_title)
 
@@ -141,14 +137,12 @@ def parse_zaobao_titles(entries):
 
     # 3. 开始解析内容
     if target_entry:
-        # 获取最佳内容源
         raw_content = get_entry_content(target_entry)
         results = extract_numbered_titles(raw_content)
         
         if results:
             return results
         else:
-            # === 关键调试信息 ===
             print(f"DEBUG: Extraction failed. Preview of raw content (first 500 chars):")
             clean_preview = re.sub(r"<[^>]+>", "", raw_content)[:500]
             print(f"--- START RAW PREVIEW ---\n{clean_preview}\n--- END RAW PREVIEW ---")
@@ -198,7 +192,6 @@ def main():
         print("Error: Could not extract points. See DEBUG logs above.")
         return
 
-    # 生成最终文案
     today_str = datetime.now(TZ_CN).strftime("%Y-%m-%d")
     lines = [f"📰 一财早报（{today_str}）— 要点速览\n"]
 
