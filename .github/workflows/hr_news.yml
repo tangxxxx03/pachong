@@ -3,7 +3,7 @@ name: HR News（大客户群）
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"
+    - cron: "0 1 * * 1-5"   # 工作日 09:00（北京时间）
 
 jobs:
   run:
@@ -11,6 +11,7 @@ jobs:
     timeout-minutes: 30
 
     env:
+      # ========= 业务参数 =========
       HR_TZ: Asia/Shanghai
       HR_ONLY_TODAY: "1"
       HR_MAX_ITEMS: "1"
@@ -20,9 +21,10 @@ jobs:
       HR_FILTER_KEYWORDS: "人力资源,社保,员工,用工,劳动,招聘,工资,缴费"
       HR_REQUIRE_ALL: "0"
 
-      # ——— 正确的钉钉变量 ——注意名称———
-      DINGTALK_BASE:   ${{ secrets. }}
-      DINGTALK_SECRET: ${{ secrets. }}
+      # ========= 钉钉（实验群）=========
+      # ⚠️ 这里必须和 GitHub Secrets 名字 100% 一致
+      DINGTALK_WEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
+      DINGTALK_SECRET:  ${{ secrets.SHIYANQUNSECRET }}
 
     steps:
       - name: Checkout code
@@ -41,4 +43,4 @@ jobs:
       - name: Run HR News
         run: |
           echo "执行 hr_news_crawler.py"
-          python "hr_news_crawler.py"
+          python hr_news_crawler.py
