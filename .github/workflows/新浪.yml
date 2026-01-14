@@ -1,0 +1,54 @@
+name:新浪财经 (Titles Only)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # GitHub cron 用 UTC；UTC 01:00 = 北京时间 09:00
+    - cron: "0 1 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TZ: Asia/Shanghai
+
+      # 你要爬的列表页（把这个换成你的真实 URL）
+      START_URL: "https://finance.sina.com.cn/stock/"
+
+      # 只抓昨天：1=开启；0=抓全量（不建议）
+      ONLY_YESTERDAY: "1"
+
+      # 最多翻页数（你截图是 1-5）
+      MAX_PAGES: "5"
+
+      # 翻页间隔，别太激进
+      SLEEP_SEC: "0.8"
+
+      # 输出目录
+      OUT_DIR: "output"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run scraper
+        run: |
+          python scrape_sina_yesterday.py
+
+      - name: Upload artifact (markdown)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sina_yesterday_md
+          path: output/sina_yesterday.md
