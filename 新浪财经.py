@@ -1,4 +1,4 @@
-、# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 新浪财经 - 上市公司研究院
 抓取【前一天】新闻标题 + 链接，并通过【钉钉机器人】自动推送到群里（Markdown）
@@ -32,18 +32,15 @@ except Exception:
     from backports.zoneinfo import ZoneInfo
 
 
-# ================= 配置 =================
 START_URL = "https://finance.sina.com.cn/roll/c/221431.shtml"
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))
 SLEEP_SEC = float(os.getenv("SLEEP_SEC", "0.8"))
-
 OUT_FILE = os.getenv("OUT_FILE", "sina_yesterday.md")
 
 TZ = ZoneInfo("Asia/Shanghai")
 DATE_RE = re.compile(r"\((\d{2})月(\d{2})日\s*(\d{2}):(\d{2})\)")
 
 
-# ================= 工具函数 =================
 def now_cn():
     return datetime.now(TZ)
 
@@ -88,42 +85,25 @@ def find_next_page(soup: BeautifulSoup):
     return None
 
 
-# ================= 钉钉：token/webhook 兼容解析 =================
 def extract_access_token(token_or_webhook: str) -> str:
-    """
-    兼容两种输入：
-    1) 只给 access_token：  "xxxxxx"
-    2) 给整条 webhook：     "https://oapi.dingtalk.com/robot/send?access_token=xxxxxx"
-    """
     s = (token_or_webhook or "").strip()
     if not s:
         return ""
-
-    # 如果是整条 URL，解析 query
     if "access_token=" in s:
         try:
-            # 允许用户只复制了 ?access_token=xxx 这段
             if s.startswith("http"):
                 u = urllib.parse.urlparse(s)
                 q = urllib.parse.parse_qs(u.query)
-                tok = (q.get("access_token") or [""])[0].strip()
-                return tok
+                return (q.get("access_token") or [""])[0].strip()
             else:
-                # 非 http，但包含 access_token=（例如直接粘贴 query）
                 part = s.split("access_token=", 1)[1]
-                tok = part.split("&", 1)[0].strip()
-                return tok
+                return part.split("&", 1)[0].strip()
         except Exception:
-            pass
-
-    # 否则当作 token
+            return ""
     return s
 
 
 def dingtalk_signed_url(access_token: str, secret: str) -> str:
-    """
-    钉钉机器人“加签”URL生成
-    """
     timestamp = str(int(time.time() * 1000))
     string_to_sign = f"{timestamp}\n{secret}"
     hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
@@ -134,15 +114,12 @@ def dingtalk_signed_url(access_token: str, secret: str) -> str:
 def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
     raw = (os.getenv("DINGTALK_TOKEN") or "").strip()
     secret = (os.getenv("DINGTALK_SECRET") or "").strip()
-
     access_token = extract_access_token(raw)
 
     if not access_token:
         raise RuntimeError("缺少 DINGTALK_TOKEN（可填整条 webhook 或 access_token）")
     if not secret:
         raise RuntimeError("缺少 DINGTALK_SECRET（请确认机器人已开启“加签”并填入 secret）")
-
-    # 轻量自检（不泄露 token）
     if len(access_token) < 10:
         raise RuntimeError(f"DINGTALK_TOKEN 解析后太短，疑似配置错误（len={len(access_token)}）")
 
@@ -157,18 +134,15 @@ def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
     data = r.json()
 
     if str(data.get("errcode")) != "0":
-        # 给你一条非常明确的定位提示
         if str(data.get("errcode")) == "300005":
             raise RuntimeError(
                 f"钉钉发送失败：{data}。通常是 access_token 不对："
                 f"请确认 SHIYANQUNWEBHOOK 存的是【同一个机器人】的 webhook/token，且没有多余空格。"
             )
         raise RuntimeError(f"钉钉发送失败：{data}")
-
     return data
 
 
-# ================= Markdown 生成 =================
 def build_markdown(yesterday_date, results):
     lines = [f"### 📰 新浪财经 · 昨日更新（{yesterday_date}）\n"]
     if not results:
@@ -180,7 +154,6 @@ def build_markdown(yesterday_date, results):
     return "\n".join(lines)
 
 
-# ================= 主流程 =================
 def main():
     yesterday = (now_cn() - timedelta(days=1)).date()
     results = []
