@@ -581,4 +581,27 @@ def main():
     run_hrloo = (os.getenv("RUN_HRLOO", "1").strip() != "0")
 
     hr_block = ""
-    enterprise_bloc_
+    enterprise_block = ""
+
+    if run_hrloo:
+        hr_item, hr_titles = crawl_hrloo()
+        hr_block = md_hr_info(hr_item, hr_titles)
+
+    if run_sina:
+        y, sina_items = crawl_sina_yesterday()
+        enterprise_block = md_enterprise_news(y, sina_items)
+
+    md = build_final_markdown(hr_block, enterprise_block)
+
+    out_file = os.getenv("OUT_FILE", "daily_report.md")
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write(md)
+
+    title = f"每日推送 {now_tz().strftime('%Y-%m-%d')}"
+    resp = dingtalk_send_markdown(title, md)
+    print("✅ DingTalk OK:", resp)
+    print(f"✅ wrote: {out_file}")
+
+
+if __name__ == "__main__":
+    main()
