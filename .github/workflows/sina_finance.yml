@@ -3,8 +3,7 @@ name: 新浪财经-昨日标题索引（钉钉推送）
 on:
   workflow_dispatch: {}
   schedule:
-    # UTC 01:00 = 北京时间 09:00
-    - cron: "0 1 * * *"
+    - cron: "0 1 * * *" # UTC 01:00 = 北京时间 09:00
 
 jobs:
   run:
@@ -17,7 +16,7 @@ jobs:
       SLEEP_SEC: "0.8"
       OUT_FILE: "sina_yesterday.md"
 
-      # ✅ 这里是关键：把你已有的 Secrets 映射过来
+      # ✅ 你的 secrets 名 그대로用
       DINGTALK_TOKEN:  ${{ secrets.SHIYANQUNWEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
 
