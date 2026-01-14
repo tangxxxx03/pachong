@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 外包/派遣：招标 & 中标采集（北京公共资源交易平台 + zsxtzb.cn 搜索）
-—— 采集更完整（requests优先+selenium兜底+PDF附件回退）+ 输出更极简（钉钉卡片）
+—— 采集更完整（requests优先+selenium兜底+PDF附件回退）+ 输出极简（只推明细，不推汇总）
 """
 
 import os, re, time, math, hmac, base64, hashlib
@@ -26,8 +26,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 # ================== 固定配置（不读环境变量） ==================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
-DINGTALK_SECRET  = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"  # 若开启“加签”，填入密钥；未开启则留空字符串
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
+DINGTALK_SECRET  = ""  # 若开启“加签”，填入密钥；未开启则留空字符串
 
 KEYWORDS        = ["外包", "派遣"]
 CRAWL_BEIJING   = True
@@ -185,7 +185,6 @@ def _soup_text(soup: BeautifulSoup, selector: str) -> str:
 # ================== 截止时间抽取（更稳） ==================
 def extract_deadline(detail_text: str) -> str:
     txt = _safe_text(detail_text)
-
     pats = [
         r"(?:投标(?:文件)?|递交(?:响应)?文件|响应文件提交|报价|报名|获取招标文件)\s*截止(?:时间|日期)\s*[:：]?\s*([^\n\r，。;；]{6,40})",
         r"(?:提交|递交)\s*截止(?:时间|日期)\s*[:：]?\s*([^\n\r，。;；]{6,40})",
@@ -197,7 +196,6 @@ def extract_deadline(detail_text: str) -> str:
     if norm:
         return norm
 
-    # 兜底：开标时间
     s2 = _pick_first(txt, [r"(?:开标(?:时间|日期))\s*[:：]?\s*([^\n\r，。;；]{6,40})"])
     norm2 = _normalize_date_string(s2)
     return norm2 or ""
@@ -207,7 +205,6 @@ def extract_deadline(detail_text: str) -> str:
 def extract_project_brief(detail_text: str, max_len: int = 80) -> str:
     txt = _safe_text(detail_text)
 
-    # 优先命中“项目概况/采购需求/服务内容”附近的首段
     for pat in [
         r"(?:项目概况|项目基本情况)\s*[:：]?\s*([\s\S]{0,260}?)\n",
         r"(?:采购需求|服务范围|服务内容|项目内容)\s*[:：]?\s*([\s\S]{0,260}?)\n",
@@ -248,16 +245,8 @@ def fetch_pdf_text(url: str, referer: str = None, timeout=20) -> str:
 
 # ================== 详情页：requests优先 + selenium兜底 + PDF附件回退 ==================
 CONTENT_SELECTORS = [
-    "#vsb_content",
-    "#zoom",
-    "#xxnr",
-    "#info",
-    "article",
-    "main",
-    ".content",
-    ".article",
-    ".detail",
-    ".cont",
+    "#vsb_content", "#zoom", "#xxnr", "#info",
+    "article", "main", ".content", ".article", ".detail", ".cont",
 ]
 
 def _extract_main_text_from_html(html: str) -> str:
@@ -265,16 +254,13 @@ def _extract_main_text_from_html(html: str) -> str:
         return ""
     soup = BeautifulSoup(html, "lxml")
 
-    # 1) 按常见容器优先
     for sel in CONTENT_SELECTORS:
         t = _soup_text(soup, sel)
         if t and len(t) >= 120:
             return t
 
-    # 2) 兜底：body
     body = soup.body.get_text("\n", strip=True) if soup.body else soup.get_text("\n", strip=True)
-    body = _clean_line(body)
-    return body
+    return _clean_line(body)
 
 def _extract_pdf_links_from_html(html: str, base_url: str) -> list:
     if not html:
@@ -288,7 +274,6 @@ def _extract_pdf_links_from_html(html: str, base_url: str) -> list:
         absu = urljoin(base_url, href)
         if absu.lower().endswith(".pdf"):
             pdfs.append(absu)
-    # 去重
     out, seen = [], set()
     for u in pdfs:
         if u in seen:
@@ -298,7 +283,6 @@ def _extract_pdf_links_from_html(html: str, base_url: str) -> list:
     return out
 
 def get_detail_text(url: str, driver=None) -> str:
-    # A) requests 直接抓
     html = ""
     try:
         r = _SESSION.get(url, timeout=20)
@@ -311,7 +295,6 @@ def get_detail_text(url: str, driver=None) -> str:
     if text and len(text) >= 120:
         return text
 
-    # B) selenium 兜底（动态渲染页）
     if driver is not None:
         try:
             driver.get(url)
@@ -324,14 +307,12 @@ def get_detail_text(url: str, driver=None) -> str:
         except Exception:
             pass
 
-    # C) 附件 PDF 回退（从最终拿到的 html 里找）
     for pdf_url in _extract_pdf_links_from_html(html, url)[:3]:
         pdf_text = fetch_pdf_text(pdf_url, referer=url)
         pdf_text = _safe_text(pdf_text)
         if pdf_text and len(pdf_text) >= 120:
             return pdf_text
 
-    # D) 最后兜底：能返回多少算多少
     return text or _extract_main_text_from_html(html) or ""
 
 
@@ -339,7 +320,6 @@ def get_detail_text(url: str, driver=None) -> str:
 def parse_bidding_fields(detail_text: str):
     txt = _safe_text(detail_text)
 
-    # 预算/最高限价/控制价
     amount = _pick_first(txt, [
         r"(?:预算金额|采购预算|项目预算)\s*[:：]?\s*([0-9\.,，]+\s*(?:万元|元))",
         r"(?:最高限价|控制价)\s*[:：]?\s*([0-9\.,，]+\s*(?:万元|元))",
@@ -347,9 +327,7 @@ def parse_bidding_fields(detail_text: str):
     amount = _normalize_amount_text(amount) if amount else "暂无"
 
     purchaser = _pick_first(txt, [r"(?:采购人|采购单位|招标人)\s*[:：]?\s*([^\n\r，。;；]{2,80})"]) or "暂无"
-    agent     = _pick_first(txt, [r"(?:采购代理机构|代理机构|招标代理)\s*[:：]?\s*([^\n\r，。;；]{2,80})"]) or "暂无"
 
-    # 联系人 + 电话（尽量从“项目联系人”块里抓）
     contact = "暂无"
     phone   = "暂无"
     m_cp = re.search(
@@ -372,7 +350,6 @@ def parse_bidding_fields(detail_text: str):
     return {
         "金额": amount,
         "采购人": purchaser,
-        "代理机构": agent,
         "联系人": contact,
         "联系电话": phone,
         "投标截止": deadline,
@@ -380,7 +357,7 @@ def parse_bidding_fields(detail_text: str):
     }
 
 
-# ================== 中标解析：表格优先 + 文本兜底（保留但输出也极简） ==================
+# ================== 中标解析：表格优先 + 文本兜底（输出也极简） ==================
 def _num_from_any(v):
     if v in (None, "", "暂无"): return None
     s = str(v).replace(",", "").replace("，", "")
@@ -487,14 +464,12 @@ def parse_award_fields(detail_html: str, detail_text: str):
     if data.get("中标公司") == "暂无" and data.get("中标金额") == "暂无":
         data = parse_award_from_text(detail_text)
 
-    # 中标日期（极简）
     txt = _safe_text(detail_text or "")
     award_date = _pick_first(txt, [
         r"(?:公告日期|公示时间|发布时间|成交日期|中标日期)\s*[：:]\s*([0-9]{4}[-/.][0-9]{1,2}[-/.][0-9]{1,2})",
     ]) or _date_in_text(txt)
     award_date = _normalize_date_string(award_date) or award_date or "暂无"
     data["中标日期"] = award_date
-
     return data
 
 
@@ -529,13 +504,11 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
             url = f"https://ggzyfw.beijing.gov.cn/elasticsearch/index.jsp?qt={kw}"
             driver.get(url)
 
-            # 等列表加载
             try:
                 WebDriverWait(driver, 12).until(EC.presence_of_all_elements_located((By.CLASS_NAME, "cs_search_content_box")))
             except Exception:
                 pass
 
-            # 时间过滤：一周（能点就点）
             try:
                 driver.find_element(By.XPATH, "//span[contains(text(),'时间不限')]").click()
                 time.sleep(0.4)
@@ -562,7 +535,6 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
                         if ann_type not in ("招标公告", "中标公告"):
                             continue
 
-                        # 信息来源 + 发布时间（列表行）
                         info_source, pub_time = "暂无", "暂无"
                         try:
                             source_line = c.find_element(By.CLASS_NAME, "cs_search_content_time").text
@@ -574,13 +546,10 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
                             pass
 
                         pub_date = pub_time[:10] if pub_time and pub_time != "暂无" else ""
-
-                        # 日期过滤（按发布日期）
                         if date_start and date_end and pub_date:
                             if pub_date < date_start or pub_date > date_end:
                                 continue
 
-                        # 详情链接
                         url_link = ""
                         try:
                             url_link = title_el.find_element(By.TAG_NAME, "a").get_attribute("href")
@@ -589,17 +558,14 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
 
                         if not url_link:
                             continue
-
-                        # 按 URL 去重（同公告被多个关键词命中时，后面合并关键词）
                         if url_link in seen_url:
                             continue
                         seen_url.add(url_link)
 
-                        # 抓详情（requests优先，selenium兜底）
                         detail_text = get_detail_text(url_link, driver=driver)
+
                         detail_html = ""
                         try:
-                            # 尽量拿到 html（用 requests）
                             r = _SESSION.get(url_link, timeout=20)
                             if r.status_code == 200:
                                 detail_html = r.text or ""
@@ -615,13 +581,11 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
 
                         if ann_type == "招标公告":
                             fields = parse_bidding_fields(detail_text)
-
                             due_str = fields.get("投标截止", "暂无")
                             due_dt  = _to_datetime(due_str if due_str != "暂无" else "")
 
                             keep = True
                             now = datetime.now()
-
                             if SKIP_EXPIRED and due_dt and due_dt < now:
                                 keep = False
                             if keep and DUE_FILTER_DAYS > 0 and due_dt and due_dt > now + timedelta(days=DUE_FILTER_DAYS):
@@ -660,7 +624,6 @@ def crawl_beijing(keywords, max_pages=10, date_start=None, date_end=None):
                     except Exception as ex:
                         print("解析一条出错：", ex)
 
-                # 翻页
                 try:
                     next_btn = driver.find_element(By.LINK_TEXT, "下一页")
                     cls = (next_btn.get_attribute("class") or "")
@@ -689,7 +652,6 @@ def _zs_pick_list_items_from_html(html: str, base_url: str):
     soup = BeautifulSoup(html or "", "lxml")
     items = []
 
-    # 抓所有可能的结果链接（更宽松，但会过滤掉无意义链接）
     for a in soup.find_all("a"):
         title = _clean_line(a.get_text(" ", strip=True))
         href = (a.get("href") or "").strip()
@@ -700,11 +662,9 @@ def _zs_pick_list_items_from_html(html: str, base_url: str):
         if any(x in title for x in ["首页", "上一页", "下一页", "末页", "更多", "下载", "返回"]):
             continue
         absu = urljoin(base_url, href)
-        # 简单过滤：必须像文章页
         if not (absu.startswith("http") and ("/" in urlparse(absu).path)):
             continue
 
-        # 日期从父容器附近找
         parent_text = ""
         try:
             parent = a.find_parent(["li", "div", "section"])
@@ -714,7 +674,6 @@ def _zs_pick_list_items_from_html(html: str, base_url: str):
         dt = _date_in_text(parent_text)
         items.append((title, absu, dt))
 
-    # 去重（同 href）
     uniq, seen = [], set()
     for t, h, d in items:
         if h in seen:
@@ -734,7 +693,6 @@ def crawl_zsxtzb_search(keywords, max_pages=8, date_start=None, date_end=None):
                 url = _zs_search_url(kw, page)
                 print(f"[zsxtzb] {kw} 第{page}页 -> {url}")
 
-                # requests 优先抓列表
                 html = ""
                 try:
                     r = _SESSION.get(url, timeout=20)
@@ -743,7 +701,6 @@ def crawl_zsxtzb_search(keywords, max_pages=8, date_start=None, date_end=None):
                 except Exception:
                     html = ""
 
-                # 列表拿不到，再 selenium
                 if not html.strip():
                     try:
                         driver.get(url)
@@ -770,7 +727,6 @@ def crawl_zsxtzb_search(keywords, max_pages=8, date_start=None, date_end=None):
                         continue
                     seen_url.add(href)
 
-                    # 抓详情（requests优先 + selenium兜底）
                     detail_text = get_detail_text(href, driver=driver)
 
                     detail_html = ""
@@ -790,7 +746,6 @@ def crawl_zsxtzb_search(keywords, max_pages=8, date_start=None, date_end=None):
 
                     if ann_type == "招标公告":
                         fields = parse_bidding_fields(detail_text)
-
                         due_str = fields.get("投标截止", "暂无")
                         due_dt  = _to_datetime(due_str if due_str != "暂无" else "")
 
@@ -856,9 +811,6 @@ def _sort_key_time(s: str):
     return dt or datetime(1970, 1, 1)
 
 def _merge_by_url(items, url_field, kw_field="关键词"):
-    """
-    同一URL：合并关键词，保留最新一条（或第一条）的其他字段
-    """
     mp = {}
     for it in items:
         u = (it.get(url_field) or "").strip()
@@ -874,7 +826,6 @@ def _merge_by_url(items, url_field, kw_field="关键词"):
             merged = [x for x in (list(kws | kws2)) if x]
             old[kw_field] = "，".join(sorted(merged))
 
-            # 用发布时间更晚的覆盖
             t_old = _sort_key_time(old.get("公告发布时间") or old.get("发布时间"))
             t_new = _sort_key_time(it.get("公告发布时间") or it.get("发布时间"))
             if t_new > t_old:
@@ -906,7 +857,6 @@ def format_bidding_markdown(items, date_start, date_end):
         src  = it.get("信息来源","暂无")
         site = it.get("站点","暂无")
         kw   = it.get("关键词","")
-
         brief = it.get("简要摘要","暂无")
 
         lines.append(f"**{idx}. {show}**")
@@ -967,7 +917,6 @@ def split_and_send(title_prefix: str, full_text: str, chunk_size=DINGTALK_CHUNK)
 
 # ================== MAIN ==================
 if __name__ == '__main__':
-    print("Webhook 状态：", "已配置（加签）" if (DINGTALK_WEBHOOK and DINGTALK_SECRET) else ("已配置" if DINGTALK_WEBHOOK else "未配置"))
     date_start, date_end = get_date_range()
     print(f"采集日期：{date_start} ~ {date_end}")
 
@@ -983,24 +932,16 @@ if __name__ == '__main__':
         all_bidding.extend(b2)
         all_award.extend(a2)
 
-    # 汇总（极简）
-    sum_text = (
-        f"### 📣 外包/派遣采集完成\n"
-        f"- 日期：{date_start} ~ {date_end}\n"
-        f"- 招标：{len(_merge_by_url(all_bidding, '公告网址'))} 条（按URL去重）\n"
-        f"- 中标/成交：{len(_merge_by_url(all_award, '中标网址'))} 条（按URL去重）\n"
-        f"- 过滤：{'丢弃已过期' if SKIP_EXPIRED else '保留已过期'}；"
-        f"{('仅保留未来 ' + str(DUE_FILTER_DAYS) + ' 天内截止') if DUE_FILTER_DAYS>0 else '不过滤未来天数'}\n"
-    )
-    send_to_dingtalk_markdown("外包/派遣采集汇总", sum_text)
+    # ✅ 不推汇总！只推明细（有内容才推）
+    all_bidding_u = _merge_by_url(all_bidding, "公告网址", "关键词")
+    all_award_u   = _merge_by_url(all_award, "中标网址", "关键词")
 
-    # 明细（极简卡片）
-    if all_bidding:
-        md_bid = format_bidding_markdown(all_bidding, date_start, date_end)
-        split_and_send("招标公告明细", md_bid)
+    if all_bidding_u:
+        md_bid = format_bidding_markdown(all_bidding_u, date_start, date_end)
+        split_and_send("招标公告", md_bid)
 
-    if all_award:
-        md_awd = format_award_markdown(all_award, date_start, date_end)
-        split_and_send("中标结果明细", md_awd)
+    if all_award_u:
+        md_awd = format_award_markdown(all_award_u, date_start, date_end)
+        split_and_send("中标/成交结果", md_awd)
 
     print("✔ 完成")
