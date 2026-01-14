@@ -26,8 +26,8 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 # ================== 固定配置（不读环境变量） ==================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=6e945607bb71c2fd9bb3399c6424fa7dece4b9798d2a8ff74b0b71ab47c9d182"
-DINGTALK_SECRET  = ""  # 若开启“加签”，填入密钥；未开启则留空字符串
+DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=0d9943129de109072430567e03689e8c7d9012ec160e023cfa94cf6cdc703e49"
+DINGTALK_SECRET  = "SEC820601d706f1894100cbfc500114a1c0977a62cfe72f9ea2b5ac2909781753d0"  # 若开启“加签”，填入密钥；未开启则留空字符串
 
 KEYWORDS        = ["外包", "派遣"]
 CRAWL_BEIJING   = True
@@ -945,3 +945,4 @@ if __name__ == '__main__':
         split_and_send("中标/成交结果", md_awd)
 
     print("✔ 完成")
+
