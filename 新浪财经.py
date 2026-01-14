@@ -293,7 +293,7 @@ class HRLooCrawler:
         self.session = make_session()
         self.results = []
 
-        t = (os.getenv("HR_TARGET_DATE") or "").strip():
+        t = (os.getenv("HR_TARGET_DATE") or "").strip()
         if t:
             try:
                 y,m,d = map(int, re.split(r"[-/\.]", t))
