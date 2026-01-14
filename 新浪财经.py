@@ -1,18 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 新浪财经 - 上市公司研究院
-只抓【前一天】新闻标题 + 链接（可点击）
+抓取【前一天】新闻标题 + 链接（GitHub Actions 稳定版）
 页面：https://finance.sina.com.cn/roll/c/221431.shtml
-
-设计原则：
-- 不登录
-- 不爬正文
-- 不碰 API
-- 低频翻页
-- 只做索引级抓取（合规、安全）
 """
 
-import os
 import re
 import time
 import requests
@@ -26,10 +18,10 @@ except Exception:
     from backports.zoneinfo import ZoneInfo
 
 
-# ================= 基础配置 =================
+# ================= 配置 =================
 START_URL = "https://finance.sina.com.cn/roll/c/221431.shtml"
-MAX_PAGES = 5          # 最多翻 5 页
-SLEEP_SEC = 0.8        # 翻页间隔
+MAX_PAGES = 5
+SLEEP_SEC = 0.8
 OUT_FILE = "sina_yesterday.md"
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -44,10 +36,11 @@ def now_cn():
 def get_html(url):
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "Mozilla/5.0 (X11; Linux x86_64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
     }
     r = requests.get(url, headers=headers, timeout=15)
     r.raise_for_status()
@@ -57,9 +50,6 @@ def get_html(url):
 
 
 def parse_datetime(text):
-    """
-    从 '(01月13日 15:27)' 解析时间
-    """
     m = DATE_RE.search(text)
     if not m:
         return None
@@ -68,7 +58,6 @@ def parse_datetime(text):
     now = now_cn()
     year = now.year
 
-    # 跨年兜底
     if now.month == 1 and month == 12:
         year -= 1
 
@@ -88,8 +77,8 @@ def find_next_page(soup):
 # ================= 主逻辑 =================
 def main():
     yesterday = (now_cn() - timedelta(days=1)).date()
-
     results = []
+
     url = START_URL
     hit_yesterday = False
 
@@ -97,12 +86,18 @@ def main():
         html = get_html(url)
         soup = BeautifulSoup(html, "html.parser")
 
-        ul = soup.select_one("ul.listcontent.list_009")
-        if not ul:
-            print("❌ 未找到列表结构，页面可能改版")
+        # 🔥 关键修改：不再死盯 ul.listcontent
+        container = soup.select_one("div.listBlk")
+        if not container:
+            print("❌ 未找到 listBlk 容器")
             break
 
-        for li in ul.select("li"):
+        lis = container.find_all("li")
+        if not lis:
+            print("❌ listBlk 下未找到 li")
+            break
+
+        for li in lis:
             a = li.find("a", href=True)
             if not a:
                 continue
@@ -119,11 +114,11 @@ def main():
                 results.append((dt, title, link))
                 hit_yesterday = True
 
-        # 如果已经抓到昨天内容，且本页全是更早的，可以停
+        # 早停逻辑
         if hit_yesterday:
             dts = [
                 parse_datetime(li.get_text(" ", strip=True))
-                for li in ul.select("li")
+                for li in lis
             ]
             dts = [d for d in dts if d]
             if dts and all(d.date() < yesterday for d in dts):
@@ -136,12 +131,11 @@ def main():
         url = next_url
         time.sleep(SLEEP_SEC)
 
-    # 排序（按时间倒序）
+    # 排序
     results.sort(key=lambda x: x[0], reverse=True)
 
     # 输出 Markdown
-    lines = []
-    lines.append(f"# 新浪财经 · 昨日更新（{yesterday}）\n")
+    lines = [f"# 新浪财经 · 昨日更新（{yesterday}）\n"]
 
     if not results:
         lines.append("（昨日无更新或页面结构变化）")
