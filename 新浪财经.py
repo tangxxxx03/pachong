@@ -5,13 +5,10 @@
 
 页面：https://finance.sina.com.cn/roll/c/221431.shtml
 
-GitHub Secrets（你现在已有的）：
-- SHIYANQUNWEBHOOK : 可以是【整条 webhook URL】或【仅 access_token】
-- SHIYANQUNSECRET  : 加签 secret
-
-环境变量（由 yml 注入）：
-- DINGTALK_TOKEN   : webhook 或 token（二者都支持）
-- DINGTALK_SECRET  : 加签密钥
+修复点：
+- 强去重：按 link 去重 + (title, time) 兜底
+- 选“真实正文链接”：优先 .shtml 或 /doc- 这类详情页
+- 防止同页重复 a 导致刷屏
 """
 
 import os
@@ -65,13 +62,11 @@ def parse_datetime(text: str):
     m = DATE_RE.search(text)
     if not m:
         return None
-
     month, day, hh, mm = map(int, m.groups())
     now = now_cn()
     year = now.year
     if now.month == 1 and month == 12:
         year -= 1
-
     try:
         return datetime(year, month, day, hh, mm, tzinfo=TZ)
     except Exception:
@@ -85,6 +80,7 @@ def find_next_page(soup: BeautifulSoup):
     return None
 
 
+# ===== 钉钉 =====
 def extract_access_token(token_or_webhook: str) -> str:
     s = (token_or_webhook or "").strip()
     if not s:
@@ -95,9 +91,8 @@ def extract_access_token(token_or_webhook: str) -> str:
                 u = urllib.parse.urlparse(s)
                 q = urllib.parse.parse_qs(u.query)
                 return (q.get("access_token") or [""])[0].strip()
-            else:
-                part = s.split("access_token=", 1)[1]
-                return part.split("&", 1)[0].strip()
+            part = s.split("access_token=", 1)[1]
+            return part.split("&", 1)[0].strip()
         except Exception:
             return ""
     return s
@@ -124,23 +119,49 @@ def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
         raise RuntimeError(f"DINGTALK_TOKEN 解析后太短，疑似配置错误（len={len(access_token)}）")
 
     url = dingtalk_signed_url(access_token, secret)
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {"title": title, "text": markdown_text}
-    }
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
 
     r = requests.post(url, json=payload, timeout=15)
     r.raise_for_status()
     data = r.json()
-
     if str(data.get("errcode")) != "0":
-        if str(data.get("errcode")) == "300005":
-            raise RuntimeError(
-                f"钉钉发送失败：{data}。通常是 access_token 不对："
-                f"请确认 SHIYANQUNWEBHOOK 存的是【同一个机器人】的 webhook/token，且没有多余空格。"
-            )
         raise RuntimeError(f"钉钉发送失败：{data}")
     return data
+
+
+# ===== 关键：从一个 li 里选“真实正文链接” =====
+def pick_best_link(li: BeautifulSoup):
+    """
+    li 里可能有多个 <a>，我们挑最像正文页的：
+    1) 优先 href 包含 '.shtml' 或 '/doc-' 或 '/article/'
+    2) 再退回第一个 href
+    """
+    links = []
+    for a in li.find_all("a", href=True):
+        href = a["href"].strip()
+        text = a.get_text(strip=True)
+        if not href:
+            continue
+        abs_url = urljoin(START_URL, href)
+        links.append((abs_url, text))
+
+    if not links:
+        return None, None
+
+    def score(u: str):
+        s = 0
+        if ".shtml" in u:
+            s += 10
+        if "/doc-" in u:
+            s += 8
+        if "/article/" in u:
+            s += 6
+        if "finance.sina.com.cn" in u:
+            s += 2
+        return s
+
+    links.sort(key=lambda x: score(x[0]), reverse=True)
+    return links[0][0], links[0][1]
 
 
 def build_markdown(yesterday_date, results):
@@ -156,8 +177,12 @@ def build_markdown(yesterday_date, results):
 
 def main():
     yesterday = (now_cn() - timedelta(days=1)).date()
-    results = []
 
+    # 强去重容器
+    seen_link = set()
+    seen_title_time = set()
+
+    results = []
     url = START_URL
     hit_yesterday = False
 
@@ -172,25 +197,55 @@ def main():
 
         lis = container.find_all("li")
         if not lis:
-            print("❌ listBlk 下未找到 li，页面结构可能变化")
+            print("❌ listBlk 下未找到 li")
             break
 
-        for li in lis:
-            a = li.find("a", href=True)
-            if not a:
-                continue
-            title = a.get_text(strip=True)
-            link = urljoin(START_URL, a["href"])
-            text = li.get_text(" ", strip=True)
+        page_links = []
 
-            dt = parse_datetime(text)
+        for li in lis:
+            text_all = li.get_text(" ", strip=True)
+            dt = parse_datetime(text_all)
             if not dt:
                 continue
 
-            if dt.date() == yesterday:
-                results.append((dt, title, link))
-                hit_yesterday = True
+            # 只要昨天
+            if dt.date() != yesterday:
+                continue
 
+            link, _anchor_text = pick_best_link(li)
+            if not link:
+                continue
+
+            # 标题：优先用 li 里第一个 a 的文字；如果为空，用 anchor_text
+            a0 = li.find("a")
+            title = (a0.get_text(strip=True) if a0 else "") or (_anchor_text or "")
+            title = title.strip()
+            if not title:
+                continue
+
+            # 去重 key
+            k_link = link
+            k_tt = (title, dt.strftime("%Y-%m-%d %H:%M"))
+
+            # 强去重：先按 link
+            if k_link in seen_link:
+                continue
+            # 兜底去重：同标题同时间
+            if k_tt in seen_title_time:
+                continue
+
+            seen_link.add(k_link)
+            seen_title_time.add(k_tt)
+
+            results.append((dt, title, link))
+            page_links.append(link)
+            hit_yesterday = True
+
+        # 如果这一页抓到的 link 全一样，直接提示（避免刷屏）
+        if page_links and len(set(page_links)) == 1 and len(page_links) >= 2:
+            print("⚠️ 警告：本页抓到的链接全部相同，已通过去重过滤；建议后续继续观察页面结构。")
+
+        # 早停：已经命中昨天，并且本页所有时间都 < yesterday -> 停
         if hit_yesterday:
             dts = [parse_datetime(li.get_text(" ", strip=True)) for li in lis]
             dts = [d for d in dts if d]
@@ -200,10 +255,10 @@ def main():
         next_url = find_next_page(soup)
         if not next_url:
             break
-
         url = next_url
         time.sleep(SLEEP_SEC)
 
+    # 倒序排列
     results.sort(key=lambda x: x[0], reverse=True)
 
     md = build_markdown(yesterday, results)
@@ -211,7 +266,7 @@ def main():
     with open(OUT_FILE, "w", encoding="utf-8") as f:
         f.write(md + "\n")
 
-    print(f"✅ 抓取完成，共 {len(results)} 条，已写入 {OUT_FILE}")
+    print(f"✅ 抓取完成（去重后），共 {len(results)} 条，已写入 {OUT_FILE}")
 
     title = f"新浪财经昨日更新 {yesterday}"
     resp = dingtalk_send_markdown(title=title, markdown_text=md)
