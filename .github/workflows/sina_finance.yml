@@ -17,9 +17,9 @@ jobs:
       SLEEP_SEC: "0.8"
       OUT_FILE: "sina_yesterday.md"
 
-      # 关键：从 GitHub Secrets 注入
-      DINGTALK_TOKEN: ${{ secrets.SHIYANQUN_TOKEN }}
-      DINGTALK_SECRET: ${{ secrets.SHIYANQUN_SECRET }}
+      # ✅ 这里是关键：把你已有的 Secrets 映射过来
+      DINGTALK_TOKEN:  ${{ secrets.SHIYANQUNWEBHOOK }}
+      DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
 
     steps:
       - name: Checkout repository
