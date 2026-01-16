@@ -388,3 +388,4 @@ def parse_award_from_tables(html: str):
 
         c_sup = find_col(["供应商名称", "供应商", "单位名称", "中标人", "成交人"])
         c
+
