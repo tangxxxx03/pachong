@@ -1,14 +1,14 @@
-name: MOHRSS Local News to DingTalk (ShiyanQun)
+name: MOHRSS Local News to DingTalk (Playwright)
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"  # UTC 01:00 = 北京 09:00（周一到周五）
+    - cron: "0 1 * * 1-5"  # 北京 09:00（UTC 01:00）
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -22,16 +22,14 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
 
       - name: Run crawler
         env:
           HR_TZ: Asia/Shanghai
           SHIYANQUNWEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
           SHIYANQUNSECRET: ${{ secrets.SHIYANQUNSECRET }}
-          # 可选：如果你想强制指定列表页（一般不需要）
           # LIST_URL: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/index.html"
-          # 可选：覆盖栏目目录
-          # LIST_BASE: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"
         run: |
           python mohrss_local_news.py
