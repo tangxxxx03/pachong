@@ -1,47 +1,72 @@
 # -*- coding: utf-8 -*-
 """
-人社部网站 - 新闻中心 - 地方动态 列表抓取
-需求：
-- 周二~周五：抓取“前一天”的信息
-- 周一：抓取“上周五”的信息
-- 其他日期：默认不抓（你也可以改成抓上一个工作日）
+人社部-新闻中心-地方动态：按日期抓取并用钉钉机器人推送（完整代码）
 
-输出：
-- 控制台打印
-- 同时写出 json 文件：mohrss_local_news_YYYY-MM-DD.json
+规则：
+- 周一：抓上周五
+- 周二~周五：抓前一天
+- 周六/周日：不抓（可自行改）
+
+钉钉：
+- 使用“自定义机器人” + “加签”
+- 环境变量：
+  - DINGTALK_BASE   例：https://oapi.dingtalk.com/robot/send?access_token=xxxxx
+  - DINGTALK_SECRET 机器人加签 secret
+可选：
+  - HR_TZ           默认 Asia/Shanghai
+  - LIST_URL        覆盖列表页地址
 """
 
+import os
 import re
 import json
-import sys
+import time
+import hmac
+import base64
+import hashlib
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote_plus
 
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    from backports.zoneinfo import ZoneInfo
 
-BASE = "https://www.mohrss.gov.cn"
-LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/rdzt/gzdt/"  # 你截图这类列表页的上层目录一般长这样
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
 
+DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/rdzt/gzdt/"  # 你截图对应的地方动态列表目录（可用 LIST_URL 覆盖）
 
-def _norm(s: str) -> str:
+
+def _tz():
+    return ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai"))
+
+
+def now_tz():
+    return datetime.now(_tz())
+
+
+def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def zh_weekday(dt: datetime) -> str:
+    return ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][dt.weekday()]
 
 
 def compute_target_date(now: datetime) -> str | None:
     """
-    返回目标日期字符串：YYYY-MM-DD
-    规则：
-    - 周一：回到上周五（-3天）
-    - 周二~周五：回到昨天（-1天）
-    - 周六/周日：返回 None（不抓）
+    - 周一：抓上周五（-3天）
+    - 周二~周五：抓昨天（-1天）
+    - 周六/周日：None（不抓）
     """
     wd = now.weekday()  # Mon=0 ... Sun=6
-    if wd == 0:  # Monday
+    if wd == 0:
         return (now - timedelta(days=3)).strftime("%Y-%m-%d")
-    if 1 <= wd <= 4:  # Tue-Fri
+    if 1 <= wd <= 4:
         return (now - timedelta(days=1)).strftime("%Y-%m-%d")
     return None
 
@@ -49,57 +74,45 @@ def compute_target_date(now: datetime) -> str | None:
 def fetch_html(url: str) -> str:
     s = requests.Session()
     s.headers.update({"User-Agent": UA})
-    # 适度容错（政府站偶尔慢）
     r = s.get(url, timeout=20)
     r.raise_for_status()
-    # requests 通常能自动识别编码；如果乱码，可强制：
+    # 如遇乱码可尝试强制：
     # r.encoding = "utf-8"
     return r.text
 
 
 def parse_list(html: str, page_url: str) -> list[dict]:
     """
-    解析列表页，提取：
-    - title
-    - url
-    - date (YYYY-MM-DD)
-
-    你的截图里：
-    - 标题是 a 标签（如 “黑龙江：多维发力牢牢稳住就业基本盘”）
-    - 日期在 span.organMenuTxtLink 里（如 2026-01-16）
+    解析列表页：title + url + date(YYYY-MM-DD)
+    你截图里日期是 span.organMenuTxtLink，标题是 a 标签
     """
     soup = BeautifulSoup(html, "html.parser")
-
     items = []
 
-    # 1) 优先按“日期 span”来定位（最贴合你截图）
+    # 方案1：按日期 span 定位（最贴合你的截图）
     date_spans = soup.select("span.organMenuTxtLink")
     for sp in date_spans:
-        date_text = _norm(sp.get_text())
+        date_text = norm(sp.get_text())
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
             continue
 
-        # 日期附近通常会有标题链接（在同一条目容器里）
-        # 向上找一个比较“像条目”的容器
         container = sp
         for _ in range(6):
             if container is None:
                 break
-            # 容器里能找到 <a href="...html"> 且文字不为空，就当成条目
             a = container.find("a", href=True)
-            if a and _norm(a.get_text()):
-                title = _norm(a.get_text())
+            if a and norm(a.get_text()):
+                title = norm(a.get_text())
                 href = a["href"].strip()
                 full_url = urljoin(page_url, href)
                 items.append({"date": date_text, "title": title, "url": full_url})
                 break
             container = container.parent
 
-    # 2) 如果上面没抓到（页面结构变了），做一个兜底：抓所有带日期模式的条目
+    # 兜底：如果页面结构变了，抓所有 a，并在父容器里找日期
     if not items:
-        # 找所有 a，然后在它父容器里找日期
         for a in soup.find_all("a", href=True):
-            title = _norm(a.get_text())
+            title = norm(a.get_text())
             if not title:
                 continue
             href = a["href"].strip()
@@ -111,8 +124,8 @@ def parse_list(html: str, page_url: str) -> list[dict]:
             for _ in range(6):
                 if parent is None:
                     break
-                text = _norm(parent.get_text(" "))
-                m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+                txt = norm(parent.get_text(" "))
+                m = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", txt)
                 if m:
                     found_date = m.group(1)
                     break
@@ -121,7 +134,7 @@ def parse_list(html: str, page_url: str) -> list[dict]:
             if found_date:
                 items.append({"date": found_date, "title": title, "url": urljoin(page_url, href)})
 
-    # 去重（同一条可能被扫描到两次）
+    # 去重
     seen = set()
     uniq = []
     for it in items:
@@ -131,36 +144,103 @@ def parse_list(html: str, page_url: str) -> list[dict]:
         seen.add(key)
         uniq.append(it)
 
-    # 按日期倒序、标题排序（可选）
+    # 排序：日期倒序
     uniq.sort(key=lambda x: (x["date"], x["title"]), reverse=True)
     return uniq
 
 
+def dingtalk_signed_url(base_url: str, secret: str) -> str:
+    """
+    钉钉“加签”：
+    url = base_url + "&timestamp=xxx&sign=xxx"
+    """
+    timestamp = str(int(time.time() * 1000))
+    string_to_sign = f"{timestamp}\n{secret}"
+    h = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    sign = quote_plus(base64.b64encode(h))
+    joiner = "&" if "?" in base_url else "?"
+    return f"{base_url}{joiner}timestamp={timestamp}&sign={sign}"
+
+
+def dingtalk_send_markdown(title: str, markdown: str):
+    base = os.getenv("DINGTALK_BASE", "").strip()
+    secret = os.getenv("DINGTALK_SECRET", "").strip()
+
+    if not base or not secret:
+        raise RuntimeError("缺少环境变量：DINGTALK_BASE 或 DINGTALK_SECRET")
+
+    url = dingtalk_signed_url(base, secret)
+
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": title,
+            "text": markdown
+        }
+    }
+
+    r = requests.post(url, json=payload, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("errcode") != 0:
+        raise RuntimeError(f"钉钉发送失败：{data}")
+    return data
+
+
+def build_markdown(list_url: str, target_date: str, items: list[dict], now: datetime) -> tuple[str, str]:
+    """
+    生成钉钉 Markdown（控制长度，保证可读）
+    """
+    title = f"📰 人社部·地方动态（{target_date}）"
+
+    head = [
+        f"### 📰 人社部·地方动态（目标日：**{target_date}**）",
+        f"- 抓取时间：{now.strftime('%Y-%m-%d %H:%M:%S')}（{zh_weekday(now)}）",
+        f"- 列表页：{list_url}",
+        ""
+    ]
+
+    if not items:
+        body = [
+            "本次未匹配到目标日期的条目。",
+            "",
+            "> 可能原因：当天未发布 / 页面延迟更新 / 列表页结构变动。",
+        ]
+        return title, "\n".join(head + body)
+
+    lines = []
+    for i, it in enumerate(items, 1):
+        # 钉钉 markdown 支持 [text](url)
+        lines.append(f"{i}. [{it['title']}]({it['url']})  `({it['date']})`")
+
+    tail = [
+        "",
+        f"—— 共 **{len(items)}** 条"
+    ]
+
+    return title, "\n".join(head + lines + tail)
+
+
 def main():
-    now = datetime.now()
+    list_url = os.getenv("LIST_URL", DEFAULT_LIST_URL).strip()
+    now = now_tz()
     target = compute_target_date(now)
 
     if not target:
-        print("今天是周末（或你没安排抓取的日子），按规则不抓取。")
+        print("今天是周末（或未安排抓取日），按规则不抓取，也不推送。")
         return
 
-    print(f"目标日期：{target}")
+    print(f"[INFO] 目标日期：{target}")
+    html = fetch_html(list_url)
+    items = parse_list(html, list_url)
 
-    # 抓列表页
-    html = fetch_html(LIST_URL)
-    items = parse_list(html, LIST_URL)
-
-    # 过滤目标日期
     hit = [x for x in items if x.get("date") == target]
+    print(f"[INFO] 解析 {len(items)} 条，命中 {len(hit)} 条。")
 
-    print(f"列表页共解析到 {len(items)} 条，命中目标日期 {len(hit)} 条。")
-    for i, it in enumerate(hit, 1):
-        print(f"{i}. [{it['date']}] {it['title']}\n   {it['url']}")
-
-    # 输出文件
+    # 写本地 JSON（方便你排查）
     out = {
         "source": "mohrss_local_news",
-        "list_url": LIST_URL,
+        "list_url": list_url,
         "target_date": target,
         "count": len(hit),
         "items": hit,
@@ -169,12 +249,12 @@ def main():
     out_path = f"mohrss_local_news_{target}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
+    print(f"[INFO] 已写出：{out_path}")
 
-    print(f"\n已写出：{out_path}")
-
-    # 如果你希望“目标日必须有数据，否则视为异常”，可以取消注释：
-    # if len(hit) == 0:
-    #     sys.exit(2)
+    # 组装并发送钉钉
+    title, md = build_markdown(list_url, target, hit, now)
+    resp = dingtalk_send_markdown(title, md)
+    print(f"[INFO] 钉钉发送成功：{resp}")
 
 
 if __name__ == "__main__":
