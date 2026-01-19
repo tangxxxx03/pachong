@@ -7,12 +7,13 @@
 - 周二~周五：抓前一天
 - 周六/周日：不抓（可自行改）
 
-钉钉：
-- 使用“自定义机器人” + “加签”
-- 环境变量：
+钉钉（可选）：
+- 自定义机器人 + 加签
+- 环境变量（建议 GitHub Secrets）：
   - DINGTALK_BASE   例：https://oapi.dingtalk.com/robot/send?access_token=xxxxx
   - DINGTALK_SECRET 机器人加签 secret
-可选：
+
+其他可选环境变量：
   - HR_TZ           默认 Asia/Shanghai
   - LIST_URL        覆盖列表页地址
 """
@@ -37,8 +38,7 @@ except Exception:
 
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-
-DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/rdzt/gzdt/"  # 你截图对应的地方动态列表目录（可用 LIST_URL 覆盖）
+DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/rdzt/gzdt/"
 
 
 def _tz():
@@ -63,7 +63,7 @@ def compute_target_date(now: datetime) -> str | None:
     - 周二~周五：抓昨天（-1天）
     - 周六/周日：None（不抓）
     """
-    wd = now.weekday()  # Mon=0 ... Sun=6
+    wd = now.weekday()
     if wd == 0:
         return (now - timedelta(days=3)).strftime("%Y-%m-%d")
     if 1 <= wd <= 4:
@@ -74,22 +74,20 @@ def compute_target_date(now: datetime) -> str | None:
 def fetch_html(url: str) -> str:
     s = requests.Session()
     s.headers.update({"User-Agent": UA})
-    r = s.get(url, timeout=20)
+    r = s.get(url, timeout=25)
     r.raise_for_status()
-    # 如遇乱码可尝试强制：
-    # r.encoding = "utf-8"
     return r.text
 
 
 def parse_list(html: str, page_url: str) -> list[dict]:
     """
     解析列表页：title + url + date(YYYY-MM-DD)
-    你截图里日期是 span.organMenuTxtLink，标题是 a 标签
+    你的截图里日期是 span.organMenuTxtLink，标题是 a 标签
     """
     soup = BeautifulSoup(html, "html.parser")
     items = []
 
-    # 方案1：按日期 span 定位（最贴合你的截图）
+    # 方案1：按日期 span 定位
     date_spans = soup.select("span.organMenuTxtLink")
     for sp in date_spans:
         date_text = norm(sp.get_text())
@@ -109,7 +107,7 @@ def parse_list(html: str, page_url: str) -> list[dict]:
                 break
             container = container.parent
 
-    # 兜底：如果页面结构变了，抓所有 a，并在父容器里找日期
+    # 兜底：抓所有 a 并在父容器找日期
     if not items:
         for a in soup.find_all("a", href=True):
             title = norm(a.get_text())
@@ -144,16 +142,11 @@ def parse_list(html: str, page_url: str) -> list[dict]:
         seen.add(key)
         uniq.append(it)
 
-    # 排序：日期倒序
     uniq.sort(key=lambda x: (x["date"], x["title"]), reverse=True)
     return uniq
 
 
 def dingtalk_signed_url(base_url: str, secret: str) -> str:
-    """
-    钉钉“加签”：
-    url = base_url + "&timestamp=xxx&sign=xxx"
-    """
     timestamp = str(int(time.time() * 1000))
     string_to_sign = f"{timestamp}\n{secret}"
     h = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
@@ -166,8 +159,10 @@ def dingtalk_send_markdown(title: str, markdown: str):
     base = os.getenv("DINGTALK_BASE", "").strip()
     secret = os.getenv("DINGTALK_SECRET", "").strip()
 
+    # ✅ 改动点：没配置钉钉就跳过，不让 workflow 失败
     if not base or not secret:
-        raise RuntimeError("缺少环境变量：DINGTALK_BASE 或 DINGTALK_SECRET")
+        print("[WARN] 未配置 DINGTALK_BASE / DINGTALK_SECRET，跳过钉钉推送。")
+        return {"skipped": True}
 
     url = dingtalk_signed_url(base, secret)
 
@@ -179,7 +174,7 @@ def dingtalk_send_markdown(title: str, markdown: str):
         }
     }
 
-    r = requests.post(url, json=payload, timeout=20)
+    r = requests.post(url, json=payload, timeout=25)
     r.raise_for_status()
     data = r.json()
     if data.get("errcode") != 0:
@@ -188,9 +183,6 @@ def dingtalk_send_markdown(title: str, markdown: str):
 
 
 def build_markdown(list_url: str, target_date: str, items: list[dict], now: datetime) -> tuple[str, str]:
-    """
-    生成钉钉 Markdown（控制长度，保证可读）
-    """
     title = f"📰 人社部·地方动态（{target_date}）"
 
     head = [
@@ -210,14 +202,9 @@ def build_markdown(list_url: str, target_date: str, items: list[dict], now: date
 
     lines = []
     for i, it in enumerate(items, 1):
-        # 钉钉 markdown 支持 [text](url)
         lines.append(f"{i}. [{it['title']}]({it['url']})  `({it['date']})`")
 
-    tail = [
-        "",
-        f"—— 共 **{len(items)}** 条"
-    ]
-
+    tail = ["", f"—— 共 **{len(items)}** 条"]
     return title, "\n".join(head + lines + tail)
 
 
@@ -231,13 +218,13 @@ def main():
         return
 
     print(f"[INFO] 目标日期：{target}")
+
     html = fetch_html(list_url)
     items = parse_list(html, list_url)
-
     hit = [x for x in items if x.get("date") == target]
+
     print(f"[INFO] 解析 {len(items)} 条，命中 {len(hit)} 条。")
 
-    # 写本地 JSON（方便你排查）
     out = {
         "source": "mohrss_local_news",
         "list_url": list_url,
@@ -251,10 +238,9 @@ def main():
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"[INFO] 已写出：{out_path}")
 
-    # 组装并发送钉钉
     title, md = build_markdown(list_url, target, hit, now)
     resp = dingtalk_send_markdown(title, md)
-    print(f"[INFO] 钉钉发送成功：{resp}")
+    print(f"[INFO] 钉钉返回：{resp}")
 
 
 if __name__ == "__main__":
