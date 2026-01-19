@@ -1,17 +1,21 @@
-name: MOHRSS Local News
+name: MOHRSS Local News to DingTalk (ShiyanQun)
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"   # UTC 01:00 = 北京 09:00，周一到周五
+    - cron: "0 1 * * 1-5"   # 北京时间 09:00，周一到周五
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 10
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -20,10 +24,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: Run
+      - name: Run crawler
         env:
           HR_TZ: Asia/Shanghai
-          DINGTALK_BASE: ${{ secrets.SHIYANQUNDINGTALK_BASE }}
-          DINGTALK_SECRET: ${{ secrets.SHIYANQUNDINGTALK_SECRET }}
+          SHIYANQUNWEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
+          SHIYANQUNSECRET: ${{ secrets.SHIYANQUNSECRET }}
         run: |
           python mohrss_local_news.py
