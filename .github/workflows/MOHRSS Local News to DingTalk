@@ -23,7 +23,7 @@ jobs:
       - name: Run
         env:
           HR_TZ: Asia/Shanghai
-          DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_BASE: ${{ secrets.SHIYANQUNDINGTALK_BASE }}
+          DINGTALK_SECRET: ${{ secrets.SHIYANQUNDINGTALK_SECRET }}
         run: |
           python mohrss_local_news.py
