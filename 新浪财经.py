@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 每日早报（钉钉友好版）
-- 👥 人力资讯：HRLoo 三茅日报要点（保留“查看详细”可点击）
-- 🏢 企业新闻：新浪财经 上市公司研究院（昨日标题+链接，可点击；长标题自动截断，避免钉钉渲染截断/点不开）
+- 👥 人力资讯：HRLoo 三茅日报要点（抓“当天”，保留“查看详细”可点击）
+- 🏢 企业新闻：新浪财经 上市公司研究院（周一抓上周五，其余工作日抓昨天；长标题截断，避免钉钉渲染截断/点不开）
+
+可用环境变量覆盖：
+- HR_TARGET_DATE=YYYY-MM-DD（默认今天）
+- SINA_TARGET_DATE=YYYY-MM-DD（默认：周一=上周五，其余=昨天）
 
 环境变量（GitHub Actions / Secrets）：
 - DINGTALK_TOKEN   ：可填整条 webhook 或 access_token
@@ -12,11 +16,10 @@
 - RUN_HRLOO=1/0
 - RUN_SINA=1/0
 - OUT_FILE=daily_report.md
-- HR_TARGET_DATE=YYYY-MM-DD（默认今天）
 - SRC_HRLOO_URLS=...（默认 hrloo 首页+频道）
 - SINA_MAX_PAGES=5
 - SINA_SLEEP_SEC=0.8
-- SINA_MAX_ITEMS=15（企业新闻最多推多少条）
+- SINA_MAX_ITEMS=15
 """
 
 import os
@@ -55,6 +58,26 @@ def truncate_text(s: str, max_len: int = 60) -> str:
         return s
     return s[:max_len - 1] + "…"
 
+def parse_ymd(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        y, m, d = map(int, re.split(r"[-/\.]", s))
+        return date(y, m, d)
+    except Exception:
+        return None
+
+def sina_target_date(today: date) -> date:
+    """
+    你的规则（只给新浪用）：
+    - 周一：抓上周五（today - 3 days）
+    - 其它：抓昨天（today - 1 day）
+    """
+    if today.weekday() == 0:  # Mon
+        return today - timedelta(days=3)
+    return today - timedelta(days=1)
+
 # ===================== 钉钉（加签） =====================
 def extract_access_token(token_or_webhook: str) -> str:
     s = (token_or_webhook or "").strip()
@@ -70,7 +93,9 @@ def dingtalk_signed_url(access_token: str, secret: str) -> str:
     ts = str(int(time.time() * 1000))
     to_sign = f"{ts}\n{secret}"
     sign = urllib.parse.quote_plus(
-        base64.b64encode(hmac.new(secret.encode("utf-8"), to_sign.encode("utf-8"), hashlib.sha256).digest())
+        base64.b64encode(
+            hmac.new(secret.encode("utf-8"), to_sign.encode("utf-8"), hashlib.sha256).digest()
+        )
     )
     return f"https://oapi.dingtalk.com/robot/send?access_token={access_token}&timestamp={ts}&sign={sign}"
 
@@ -136,10 +161,6 @@ def sina_find_next_page(soup: BeautifulSoup):
     return None
 
 def sina_pick_best_link(li: Tag):
-    """
-    li 里可能多个 <a>，优先选最像正文页的链接：
-    - .shtml 或 /doc- 或 /article/
-    """
     links = []
     for a in li.find_all("a", href=True):
         href = (a.get("href") or "").strip()
@@ -162,8 +183,11 @@ def sina_pick_best_link(li: Tag):
     links.sort(key=lambda x: score(x[0]), reverse=True)
     return links[0][0], links[0][1]
 
-def crawl_sina_yesterday():
-    yesterday = (now_cn() - timedelta(days=1)).date()
+def crawl_sina_target_day():
+    today = now_cn().date()
+    forced = parse_ymd(os.getenv("SINA_TARGET_DATE"))
+    target = forced or sina_target_date(today)
+
     seen_link = set()
     seen_tt = set()
     results = []
@@ -184,7 +208,7 @@ def crawl_sina_yesterday():
         for li in lis:
             text_all = li.get_text(" ", strip=True)
             dt = sina_parse_datetime(text_all)
-            if not dt or dt.date() != yesterday:
+            if not dt or dt.date() != target:
                 continue
 
             link, anchor_text = sina_pick_best_link(li)
@@ -207,11 +231,11 @@ def crawl_sina_yesterday():
             results.append((dt, title, link))
             hit = True
 
-        # 早停：已经命中昨天，且本页时间都早于昨天
+        # 早停：已经命中目标日，且本页时间都早于目标日
         if hit:
             dts = [sina_parse_datetime(li.get_text(" ", strip=True)) for li in lis]
             dts = [d for d in dts if d]
-            if dts and all(d.date() < yesterday for d in dts):
+            if dts and all(d.date() < target for d in dts):
                 break
 
         next_url = sina_find_next_page(soup)
@@ -221,23 +245,23 @@ def crawl_sina_yesterday():
         time.sleep(SINA_SLEEP_SEC)
 
     results.sort(key=lambda x: x[0], reverse=True)
-    return yesterday, results[:SINA_MAX_ITEMS]
+    return target, results[:SINA_MAX_ITEMS]
 
-def md_enterprise_news(yesterday, results):
+def md_enterprise_news(target_date, results):
     lines = []
     lines.append("## 🏢 企业新闻")
+    lines.append(f"（抓取日期：{target_date}）")
     if not results:
-        lines.append("（昨日无更新或页面结构变化）")
+        lines.append("（该日期无更新或页面结构变化）")
         return "\n".join(lines)
 
-    # 钉钉稳定写法：每条两行（标题一行 + 链接一行）
     for dt, title, link in results:
         short = truncate_text(title, 50)
         lines.append(f"- {short}  `[{dt.strftime('%H:%M')}]`")
         lines.append(f"  👉 [打开详情]({link})")
     return "\n".join(lines)
 
-# ===================== 人力资讯：HRLoo =====================
+# ===================== 人力资讯：HRLoo（当天） =====================
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
         ctx = ssl.create_default_context()
@@ -281,15 +305,9 @@ class HRLooCrawler:
         self.session = make_session()
         self.results = []
 
-        t = (os.getenv("HR_TARGET_DATE") or "").strip()
-        if t:
-            try:
-                y,m,d = map(int, re.split(r"[-/\.]", t))
-                self.target_date = date(y,m,d)
-            except:
-                self.target_date = now_cn().date()
-        else:
-            self.target_date = now_cn().date()
+        # ✅ 你的要求：三茅日报默认抓“当天”
+        forced = parse_ymd(os.getenv("HR_TARGET_DATE"))
+        self.target_date = forced or now_cn().date()
 
         self.daily_title_pat = re.compile(r"三茅日[报報]")
         self.sources = [u.strip() for u in os.getenv(
@@ -312,7 +330,6 @@ class HRLooCrawler:
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # 通道1：列表容器
         items = soup.select("div.dwxfd-list-items div.dwxfd-list-content-left")
         if items:
             for div in items:
@@ -331,7 +348,6 @@ class HRLooCrawler:
                 if self._try_detail(abs_url):
                     return True
 
-        # 通道2：兜底扫 links
         links = []
         for a in soup.select("a[href*='/news/']"):
             href = a.get("href","")
@@ -414,7 +430,6 @@ class HRLooCrawler:
             text = re.split(r"[（(]", text)[0].strip()
             if text and len(text) >= 4:
                 out.append(text)
-        # 去重保序
         seen, final = set(), []
         for t in out:
             if t in seen:
@@ -516,22 +531,21 @@ def crawl_hrloo():
 def md_hr_info(item, titles):
     lines = []
     lines.append("## 👥 人力资讯")
+    # 标题行显示“当天”
+    lines.append(f"（抓取日期：{(parse_ymd(os.getenv('HR_TARGET_DATE')) or now_cn().date())}）")
     if not item or not titles:
         lines.append("（未发现当天的“三茅日报”）")
         return "\n".join(lines)
 
-    # 要点列表（标题太长也截短一点）
     for idx, t in enumerate(titles, 1):
         lines.append(f"{idx}. {truncate_text(t, 55)}")
 
-    # “查看详细”单独一行，稳定可点击
     lines.append(f"\n👉 [查看详细]({item['url']})")
     return "\n".join(lines)
 
-# ===================== 汇总 Markdown（按你想要的标题风格） =====================
+# ===================== 汇总 Markdown =====================
 def build_markdown(hr_block: str, enterprise_block: str):
     today_mmdd = now_cn().strftime("%m-%d")
-    # 你要的：01-14 每日早报（最上面这一行）
     md = [f"## 📌 {today_mmdd} 每日早报", ""]
     md.append(hr_block or "## 👥 人力资讯\n（本次未生成）")
     md.append("\n---\n")
@@ -550,8 +564,8 @@ def main():
         hr_block = md_hr_info(hr_item, hr_titles)
 
     if run_sina:
-        y, sina_items = crawl_sina_yesterday()
-        enterprise_block = md_enterprise_news(y, sina_items)
+        target, sina_items = crawl_sina_target_day()
+        enterprise_block = md_enterprise_news(target, sina_items)
 
     md = build_markdown(hr_block, enterprise_block)
 
