@@ -1,0 +1,29 @@
+name: MOHRSS Local News
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 1 * * 1-5"   # UTC 01:00 = 北京 09:00，周一到周五
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Run
+        env:
+          HR_TZ: Asia/Shanghai
+          DINGTALK_BASE: ${{ secrets.DINGTALK_BASE }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        run: |
+          python mohrss_local_news.py
