@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-合并版：企业新闻 + 地方政策（钉钉 Markdown 友好）
-✅ 每条新闻标题本身就是超链接： 1. [标题](url)
-✅ 不再输出“查看详细 / 打开详情”
+每日简报（钉钉友好最终版）
+- 🏢 企业新闻：三茅日报要点（当天） + 新浪财经（周一抓上周五，其他工作日抓昨天）合并输出，统一连续编号
+- 🧩 地方政策：人社部-地方动态（周一抓上周五，周二~周五抓昨天；周末不抓）
 
-企业新闻：
-- 先：三茅日报（HRLoo）要点（抓当天）
-- 再：新浪财经 上市公司研究院（周一抓上周五；其他工作日抓昨天）
-- 统一连续编号
-
-地方政策：
-- 人社部-地方动态（Playwright 渲染 + 鲁棒解析）
-- 周一抓上周五；周二~周五抓前一天；周末不抓
+展示要求（按你最新要求）：
+1) 不要底部“查看详细”
+2) 每条后面都要一个 👉 [详情](url)（蓝字可点）
+3) 标题不做整段超链接（避免花眼），只让“详情”蓝字可点
+4) 企业新闻里：先三茅要点，再财经；编号统一连续
+5) 地方政策单独一块，单独编号从 1 开始
 
 钉钉环境变量（Secrets）：
 - SHIYANQUNWEBHOOK
@@ -19,16 +17,20 @@
 
 可选环境变量：
 - HR_TZ=Asia/Shanghai
+- OUT_FILE=daily_all.md
 - RUN_HRLOO=1/0
 - RUN_SINA=1/0
 - RUN_MOHRSS=1/0
-- OUT_FILE=daily_all.md
 
-- SRC_HRLOO_URLS=...
+- SRC_HRLOO_URLS=...（默认 hrloo 首页+频道）
+- HR_TARGET_DATE=YYYY-MM-DD（默认当天）
+
+- SINA_TARGET_DATE=YYYY-MM-DD（可覆盖财经抓取日）
 - SINA_MAX_PAGES=5
 - SINA_SLEEP_SEC=0.8
 - SINA_MAX_ITEMS=15
-- MOHRSS_LIST_URL=...
+
+- MOHRSS_LIST_URL=...（默认人社部地方动态列表页）
 """
 
 import os
@@ -38,6 +40,7 @@ import ssl
 import hmac
 import base64
 import hashlib
+import urllib.parse
 from datetime import datetime, timedelta, date
 from urllib.parse import urljoin, quote_plus
 
@@ -53,7 +56,7 @@ except Exception:
     from backports.zoneinfo import ZoneInfo
 
 
-# ===================== 基础工具 =====================
+# ===================== 通用 =====================
 TZ = ZoneInfo(os.getenv("HR_TZ", "Asia/Shanghai"))
 
 def now_cn() -> datetime:
@@ -62,11 +65,15 @@ def now_cn() -> datetime:
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
-def truncate_text(s: str, max_len: int = 60) -> str:
+def truncate_text(s: str, max_len: int = 70) -> str:
     s = norm(s)
     if len(s) <= max_len:
         return s
     return s[: max_len - 1] + "…"
+
+def safe_md_text(s: str) -> str:
+    # 防止标题里出现 [] 影响 markdown
+    return (s or "").replace("[", "【").replace("]", "】")
 
 def parse_ymd(s: str):
     s = (s or "").strip()
@@ -79,36 +86,60 @@ def parse_ymd(s: str):
         return None
 
 def target_prev_workday(today: date) -> date:
-    """周一：抓上周五；周二~周五：抓昨天"""
+    """
+    周一：抓上周五（today - 3）
+    周二~周五：抓昨天（today - 1）
+    周末：不运行（由 main 控制）
+    """
     if today.weekday() == 0:
         return today - timedelta(days=3)
     return today - timedelta(days=1)
 
-def md_link_title(title: str, url: str, max_len: int = 70) -> str:
-    """钉钉里标题做成链接（蓝字可点）"""
-    t = truncate_text(title, max_len)
-    # Markdown 链接里括号容易出事，做一下简单替换
-    t = t.replace("[", "【").replace("]", "】")
-    return f"[{t}]({url})"
+def md_item_with_detail(i: int, title: str, url: str) -> str:
+    """
+    每条输出： 1. 标题  👉 [详情](url)
+    """
+    title = safe_md_text(truncate_text(title, 70))
+    return f"{i}. {title}  👉 [详情]({url})"
 
 
 # ===================== 钉钉（加签） =====================
-def signed_dingtalk_url(webhook: str, secret: str) -> str:
-    timestamp = str(int(time.time() * 1000))
-    string_to_sign = f"{timestamp}\n{secret}"
-    h = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
-    sign = quote_plus(base64.b64encode(h))
-    joiner = "&" if "?" in webhook else "?"
-    return f"{webhook}{joiner}timestamp={timestamp}&sign={sign}"
+def extract_access_token(token_or_webhook: str) -> str:
+    s = (token_or_webhook or "").strip()
+    if not s:
+        return ""
+    if "access_token=" in s:
+        u = urllib.parse.urlparse(s)
+        q = urllib.parse.parse_qs(u.query)
+        return (q.get("access_token") or [""])[0].strip()
+    return s
 
-def dingtalk_send_markdown(title: str, md: str):
+def dingtalk_signed_url(webhook_or_token: str, secret: str) -> str:
+    """
+    兼容：SHIYANQUNWEBHOOK 既可以传整条 webhook，也可以只传 access_token
+    """
+    raw = (webhook_or_token or "").strip()
+    token = extract_access_token(raw)
+    if not token:
+        raise RuntimeError("SHIYANQUNWEBHOOK 为空（可填整条 webhook 或 access_token）")
+
+    ts = str(int(time.time() * 1000))
+    to_sign = f"{ts}\n{secret}"
+    sign = urllib.parse.quote_plus(
+        base64.b64encode(
+            hmac.new(secret.encode("utf-8"), to_sign.encode("utf-8"), hashlib.sha256).digest()
+        )
+    )
+    return f"https://oapi.dingtalk.com/robot/send?access_token={token}&timestamp={ts}&sign={sign}"
+
+def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
     webhook = (os.getenv("SHIYANQUNWEBHOOK") or "").strip()
     secret = (os.getenv("SHIYANQUNSECRET") or "").strip()
     if not webhook or not secret:
         raise RuntimeError("缺少 SHIYANQUNWEBHOOK 或 SHIYANQUNSECRET")
 
-    url = signed_dingtalk_url(webhook, secret)
-    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": md}}
+    url = dingtalk_signed_url(webhook, secret)
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
     r = requests.post(url, json=payload, timeout=25)
     r.raise_for_status()
     data = r.json()
@@ -117,7 +148,7 @@ def dingtalk_send_markdown(title: str, md: str):
     return data
 
 
-# ===================== 企业新闻-新浪财经 =====================
+# ===================== 企业新闻：新浪财经 =====================
 SINA_START_URL = "https://finance.sina.com.cn/roll/c/221431.shtml"
 SINA_MAX_PAGES = int(os.getenv("SINA_MAX_PAGES", "5"))
 SINA_SLEEP_SEC = float(os.getenv("SINA_SLEEP_SEC", "0.8"))
@@ -247,7 +278,7 @@ def crawl_sina_target_day():
     return target, results[:SINA_MAX_ITEMS]
 
 
-# ===================== 企业新闻-三茅（HRLoo） =====================
+# ===================== 人力资讯：HRLoo（三茅） =====================
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
         ctx = ssl.create_default_context()
@@ -280,21 +311,23 @@ def date_from_bracket_title(text: str):
     except Exception:
         return None
 
+def looks_like_numbered(text: str) -> bool:
+    return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
+
 def strip_leading_num(t: str) -> str:
     t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
     t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
     t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
     return t.strip()
 
-def looks_like_numbered(text: str) -> bool:
-    return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
-
 class HRLooCrawler:
     def __init__(self):
         self.session = make_session()
         self.results = []
+
         override = parse_ymd(os.getenv("HR_TARGET_DATE"))
         self.target_date = override or now_cn().date()
+
         self.daily_title_pat = re.compile(r"三茅日[报報]")
         self.sources = [u.strip() for u in os.getenv(
             "SRC_HRLOO_URLS",
@@ -358,12 +391,18 @@ class HRLooCrawler:
         _, titles, page_title = self._fetch_detail_clean(abs_url)
         if not page_title or not self.daily_title_pat.search(page_title):
             return False
+
         t3 = date_from_bracket_title(page_title)
         if t3 and t3 != self.target_date:
             return False
         if not titles:
             return False
-        self.results.append({"title": page_title, "url": abs_url, "titles": titles})
+
+        self.results.append({
+            "title": page_title,
+            "url": abs_url,
+            "titles": titles
+        })
         return True
 
     def _extract_h2_titles(self, root: Tag):
@@ -456,19 +495,21 @@ def crawl_hrloo():
     return it, it.get("titles", [])
 
 
-# ===================== 地方政策-人社部（MOHRSS） =====================
+# ===================== 地方政策：人社部-地方动态（Playwright） =====================
 MOHRSS_DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/index.html"
-MOHRSS_RE_DATE_DASH = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
-MOHRSS_RE_DATE_CN = re.compile(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b")
+RE_DATE_DASH = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+RE_DATE_CN = re.compile(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b")
 
-def mohrss_normalize_date(text: str) -> str | None:
+def normalize_date_text(text: str) -> str | None:
     if not text:
         return None
     s = norm(text)
-    m1 = MOHRSS_RE_DATE_DASH.search(s)
+
+    m1 = RE_DATE_DASH.search(s)
     if m1:
         return m1.group(1)
-    m2 = MOHRSS_RE_DATE_CN.search(s)
+
+    m2 = RE_DATE_CN.search(s)
     if m2:
         y = m2.group(1)
         mo = int(m2.group(2))
@@ -483,6 +524,7 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
             headless=True,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         )
+
         for _ in range(retries + 1):
             page = browser.new_page(
                 user_agent=(
@@ -494,6 +536,7 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
                 timezone_id="Asia/Shanghai",
             )
             page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
+
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 try:
@@ -506,6 +549,7 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
 
                 html = page.content()
                 last_html = html
+
                 if len(html or "") < 5000:
                     page.close()
                     time.sleep(1.2)
@@ -514,6 +558,7 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
                 page.close()
                 browser.close()
                 return html
+
             except Exception:
                 try:
                     page.close()
@@ -524,14 +569,15 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
         browser.close()
         return last_html
 
-def mohrss_parse_list_robust(html: str, page_url: str) -> list[dict]:
+def parse_list_robust(html: str, page_url: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     items = []
 
     for node in soup.find_all(string=True):
-        dt = mohrss_normalize_date(str(node))
+        dt = normalize_date_text(str(node))
         if not dt:
             continue
+
         container = node.parent
         for _ in range(12):
             if not container:
@@ -565,51 +611,58 @@ def crawl_mohrss_target_day():
     list_url = (os.getenv("MOHRSS_LIST_URL") or MOHRSS_DEFAULT_LIST_URL).strip()
 
     html = fetch_rendered_html(list_url, retries=2)
-    items = mohrss_parse_list_robust(html, list_url)
+    items = parse_list_robust(html, list_url)
     hit = [x for x in items if x["date"] == target.strftime("%Y-%m-%d")]
-    return target, hit
+    return target, list_url, hit
 
 
-# ===================== 组装 Markdown（按你要求：标题就是链接） =====================
-def build_md_enterprise_news(run_hrloo=True, run_sina=True) -> str:
+# ===================== Markdown 组装（最终样式） =====================
+def build_enterprise_block(run_hrloo: bool, run_sina: bool) -> str:
     lines = ["## 🏢 企业新闻"]
     idx = 1
 
-    # 1) 三茅要点（每条链接都跳到该日报详情页）
+    # 先三茅要点
     if run_hrloo:
         hr_item, hr_titles = crawl_hrloo()
         if hr_item and hr_titles:
             for t in hr_titles:
-                lines.append(f"{idx}. {md_link_title(t, hr_item['url'], max_len=70)}")
+                # 三茅要点详情统一跳到当天三茅日报文章页（同一个 url）
+                lines.append(md_item_with_detail(idx, t, hr_item["url"]))
                 idx += 1
         else:
             lines.append("（未发现当天的三茅日报）")
 
-    # 2) 新浪财经（每条链接跳各自详情页）
+    # 再新浪财经
     if run_sina:
         _, sina_items = crawl_sina_target_day()
         if sina_items:
             for _, title, link in sina_items:
-                lines.append(f"{idx}. {md_link_title(title, link, max_len=70)}")
+                lines.append(md_item_with_detail(idx, title, link))
                 idx += 1
         else:
             lines.append("（新浪财经无更新或页面结构变化）")
 
     return "\n".join(lines).strip()
 
-def build_md_policy(run_mohrss=True) -> str:
+def build_policy_block(run_mohrss: bool) -> str:
     lines = ["## 🧩 地方政策"]
     if not run_mohrss:
         lines.append("（本次未启用）")
         return "\n".join(lines).strip()
 
-    _, hit = crawl_mohrss_target_day()
+    # 周末不抓
+    wd = now_cn().weekday()
+    if wd >= 5:
+        lines.append("（周末不抓取）")
+        return "\n".join(lines).strip()
+
+    _, _, hit = crawl_mohrss_target_day()
     if not hit:
         lines.append("（无更新或本次未命中）")
         return "\n".join(lines).strip()
 
     for i, it in enumerate(hit, 1):
-        lines.append(f"{i}. {md_link_title(it['title'], it['url'], max_len=70)}")
+        lines.append(md_item_with_detail(i, it["title"], it["url"]))
 
     return "\n".join(lines).strip()
 
@@ -623,12 +676,18 @@ def build_markdown(enterprise_block: str, policy_block: str) -> str:
 
 
 def main():
+    # 周末不运行（你规则里周六/周日不抓）
+    wd = now_cn().weekday()
+    if wd >= 5:
+        print("[INFO] 周末不运行")
+        return
+
     run_hrloo = (os.getenv("RUN_HRLOO", "1").strip() != "0")
     run_sina = (os.getenv("RUN_SINA", "1").strip() != "0")
     run_mohrss = (os.getenv("RUN_MOHRSS", "1").strip() != "0")
 
-    enterprise_block = build_md_enterprise_news(run_hrloo=run_hrloo, run_sina=run_sina)
-    policy_block = build_md_policy(run_mohrss=run_mohrss)
+    enterprise_block = build_enterprise_block(run_hrloo, run_sina)
+    policy_block = build_policy_block(run_mohrss)
 
     md = build_markdown(enterprise_block, policy_block)
 
