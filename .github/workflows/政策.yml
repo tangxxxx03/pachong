@@ -3,7 +3,7 @@ name: MOHRSS Local News to DingTalk (ShiyanQun)
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 1 * * 1-5"  # 北京 09:00，周一到周五
+    - cron: "0 1 * * 1-5"  # UTC 01:00 = 北京 09:00（周一到周五）
 
 jobs:
   run:
@@ -29,6 +29,9 @@ jobs:
           HR_TZ: Asia/Shanghai
           SHIYANQUNWEBHOOK: ${{ secrets.SHIYANQUNWEBHOOK }}
           SHIYANQUNSECRET: ${{ secrets.SHIYANQUNSECRET }}
-          # LIST_URL: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"  # 可不填，默认就是这个
+          # 可选：如果你想强制指定列表页（一般不需要）
+          # LIST_URL: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/index.html"
+          # 可选：覆盖栏目目录
+          # LIST_BASE: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"
         run: |
           python mohrss_local_news.py
