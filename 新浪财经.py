@@ -1,22 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 每日早报（钉钉友好版）
-- 👥 人力资讯：HRLoo 三茅日报要点（抓“当天”，保留“查看详细”可点击）
-- 🏢 企业新闻：新浪财经 上市公司研究院（周一抓上周五，其余工作日抓昨天；长标题截断，避免钉钉渲染截断/点不开）
+- 👥 人力资讯：HRLoo 三茅日报要点（抓当天；保留“查看详细”可点击）
+- 🏢 企业新闻：新浪财经 上市公司研究院（周一抓上周五；其他工作日抓昨天；标题+可点击链接）
 
-可用环境变量覆盖：
-- HR_TARGET_DATE=YYYY-MM-DD（默认今天）
-- SINA_TARGET_DATE=YYYY-MM-DD（默认：周一=上周五，其余=昨天）
+展示要求（你强调的）：
+1) 不显示“抓取日期”
+2) 不显示“AI最前沿”等栏目标题（只要 numbered 要点）
+3) 链接必须可点击：每条新闻用“两行写法”（钉钉最稳）
 
 环境变量（GitHub Actions / Secrets）：
 - DINGTALK_TOKEN   ：可填整条 webhook 或 access_token
 - DINGTALK_SECRET  ：机器人加签 secret（必须开启加签）
 
-可选：
+可选环境变量：
 - RUN_HRLOO=1/0
 - RUN_SINA=1/0
 - OUT_FILE=daily_report.md
+
+- HR_TARGET_DATE=YYYY-MM-DD（默认当天；你说三茅抓当天）
 - SRC_HRLOO_URLS=...（默认 hrloo 首页+频道）
+
+- SINA_TARGET_DATE=YYYY-MM-DD（可覆盖企业新闻抓取日）
 - SINA_MAX_PAGES=5
 - SINA_SLEEP_SEC=0.8
 - SINA_MAX_ITEMS=15
@@ -44,19 +49,20 @@ except Exception:
 
 TZ = ZoneInfo("Asia/Shanghai")
 
+
 # ===================== 通用 =====================
-def now_cn():
+def now_cn() -> datetime:
     return datetime.now(TZ)
 
-def norm(s):
+def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 def truncate_text(s: str, max_len: int = 60) -> str:
-    """钉钉里一行太长容易被截断/渲染异常，主动截短更稳。"""
+    """钉钉一行太长容易被截断/点不开，主动截短更稳。"""
     s = norm(s)
     if len(s) <= max_len:
         return s
-    return s[:max_len - 1] + "…"
+    return s[: max_len - 1] + "…"
 
 def parse_ymd(s: str):
     s = (s or "").strip()
@@ -68,15 +74,17 @@ def parse_ymd(s: str):
     except Exception:
         return None
 
-def sina_target_date(today: date) -> date:
+def target_date_sina(today: date) -> date:
     """
-    你的规则（只给新浪用）：
-    - 周一：抓上周五（today - 3 days）
-    - 其它：抓昨天（today - 1 day）
+    你的规则：新浪财经
+    - 周一：抓上周五（today - 3）
+    - 其他工作日：抓昨天（today - 1）
+    说明：工作流只在周一到周五运行，所以不需要考虑周末运行的情况。
     """
-    if today.weekday() == 0:  # Mon
+    if today.weekday() == 0:  # 周一
         return today - timedelta(days=3)
     return today - timedelta(days=1)
+
 
 # ===================== 钉钉（加签） =====================
 def extract_access_token(token_or_webhook: str) -> str:
@@ -117,6 +125,7 @@ def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
     if str(data.get("errcode")) != "0":
         raise RuntimeError(f"钉钉发送失败：{data}")
     return data
+
 
 # ===================== 企业新闻：新浪财经 =====================
 SINA_START_URL = "https://finance.sina.com.cn/roll/c/221431.shtml"
@@ -161,6 +170,10 @@ def sina_find_next_page(soup: BeautifulSoup):
     return None
 
 def sina_pick_best_link(li: Tag):
+    """
+    li 里可能多个 <a>，优先选最像正文页的链接：
+    - .shtml 或 /doc- 或 /article/
+    """
     links = []
     for a in li.find_all("a", href=True):
         href = (a.get("href") or "").strip()
@@ -184,9 +197,10 @@ def sina_pick_best_link(li: Tag):
     return links[0][0], links[0][1]
 
 def crawl_sina_target_day():
+    # 允许环境变量覆盖
+    override = parse_ymd(os.getenv("SINA_TARGET_DATE"))
     today = now_cn().date()
-    forced = parse_ymd(os.getenv("SINA_TARGET_DATE"))
-    target = forced or sina_target_date(today)
+    target = override or target_date_sina(today)
 
     seen_link = set()
     seen_tt = set()
@@ -198,6 +212,7 @@ def crawl_sina_target_day():
     for _ in range(1, SINA_MAX_PAGES + 1):
         html = sina_get_html(url)
         soup = BeautifulSoup(html, "html.parser")
+
         container = soup.select_one("div.listBlk")
         if not container:
             break
@@ -247,21 +262,24 @@ def crawl_sina_target_day():
     results.sort(key=lambda x: x[0], reverse=True)
     return target, results[:SINA_MAX_ITEMS]
 
-def md_enterprise_news(target_date, results):
+def md_enterprise_news(target_day: date, results):
     lines = []
     lines.append("## 🏢 企业新闻")
-    lines.append(f"（抓取日期：{target_date}）")
+
     if not results:
-        lines.append("（该日期无更新或页面结构变化）")
+        lines.append("（无更新或页面结构变化）")
         return "\n".join(lines)
 
+    # 钉钉稳定写法：每条两行（标题一行 + 链接一行）
     for dt, title, link in results:
         short = truncate_text(title, 50)
-        lines.append(f"- {short}  `[{dt.strftime('%H:%M')}]`")
+        lines.append(f"- {short}")
         lines.append(f"  👉 [打开详情]({link})")
+
     return "\n".join(lines)
 
-# ===================== 人力资讯：HRLoo（当天） =====================
+
+# ===================== 人力资讯：HRLoo =====================
 class LegacyTLSAdapter(HTTPAdapter):
     def init_poolmanager(self, *a, **kw):
         ctx = ssl.create_default_context()
@@ -273,41 +291,47 @@ class LegacyTLSAdapter(HTTPAdapter):
 def make_session():
     s = requests.Session()
     s.headers.update({
-        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        "Accept-Language":"zh-CN,zh;q=0.9"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept-Language": "zh-CN,zh;q=0.9"
     })
-    r = Retry(total=3, backoff_factor=0.6, status_forcelist=[500,502,503,504])
+    r = Retry(total=3, backoff_factor=0.6, status_forcelist=[500, 502, 503, 504])
     s.mount("https://", LegacyTLSAdapter(max_retries=r))
     return s
 
 CN_TITLE_DATE = re.compile(r"[（(]\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*[)）]")
-def date_from_bracket_title(text:str):
+
+def date_from_bracket_title(text: str):
     m = CN_TITLE_DATE.search(text or "")
-    if not m: return None
+    if not m:
+        return None
     try:
         y, mo, d = int(m[1]), int(m[2]), int(m[3])
         return date(y, mo, d)
-    except:
+    except Exception:
         return None
 
 def looks_like_numbered(text: str) -> bool:
     return bool(re.match(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*\S+", text or ""))
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+
 def strip_leading_num(t: str) -> str:
     t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
     t = re.sub(r"^\s*[" + CIRCLED + r"]\s*", "", t)
     t = re.sub(r"^\s*[０-９]+\s*[、.．]\s*", "", t)
     return t.strip()
 
+# 过滤掉栏目标题（你指出的“AI最前沿”等）
+SECTION_BLACKLIST = {"AI最前沿", "热点速递", "行业观察", "最新动态"}
+
 class HRLooCrawler:
     def __init__(self):
         self.session = make_session()
         self.results = []
 
-        # ✅ 你的要求：三茅日报默认抓“当天”
-        forced = parse_ymd(os.getenv("HR_TARGET_DATE"))
-        self.target_date = forced or now_cn().date()
+        # ✅ 你说三茅日报抓当天：默认今天（也允许环境变量覆盖）
+        override = parse_ymd(os.getenv("HR_TARGET_DATE"))
+        self.target_date = override or now_cn().date()
 
         self.daily_title_pat = re.compile(r"三茅日[报報]")
         self.sources = [u.strip() for u in os.getenv(
@@ -330,6 +354,7 @@ class HRLooCrawler:
 
         soup = BeautifulSoup(r.text, "html.parser")
 
+        # 通道1：列表容器
         items = soup.select("div.dwxfd-list-items div.dwxfd-list-content-left")
         if items:
             for div in items:
@@ -348,9 +373,10 @@ class HRLooCrawler:
                 if self._try_detail(abs_url):
                     return True
 
+        # 通道2：兜底扫 links
         links = []
         for a in soup.select("a[href*='/news/']"):
-            href = a.get("href","")
+            href = a.get("href", "")
             if not re.search(r"/news/\d+\.html$", href):
                 continue
             text = norm(a.get_text())
@@ -392,10 +418,10 @@ class HRLooCrawler:
     def _extract_pub_time(self, soup: BeautifulSoup):
         cand = []
         for t in soup.select("time[datetime]"):
-            cand.append(t.get("datetime",""))
+            cand.append(t.get("datetime", ""))
         for m in soup.select("meta[property='article:published_time'],meta[name='pubdate'],meta[name='publishdate']"):
-            cand.append(m.get("content",""))
-        for sel in [".time",".date",".pubtime",".publish-time",".post-time",".info","meta[itemprop='datePublished']"]:
+            cand.append(m.get("content", ""))
+        for sel in [".time", ".date", ".pubtime", ".publish-time", ".post-time", ".info", "meta[itemprop='datePublished']"]:
             for x in soup.select(sel):
                 if isinstance(x, Tag):
                     cand.append(x.get_text(" ", strip=True))
@@ -406,11 +432,11 @@ class HRLooCrawler:
             if not m:
                 return None
             try:
-                y,mo,d = int(m[1]),int(m[2]),int(m[3])
+                y, mo, d = int(m[1]), int(m[2]), int(m[3])
                 hh = int(m[4]) if m[4] else 9
                 mm = int(m[5]) if m[5] else 0
-                return datetime(y,mo,d,hh,mm,tzinfo=TZ)
-            except:
+                return datetime(y, mo, d, hh, mm, tzinfo=TZ)
+            except Exception:
                 return None
 
         dts = [dt for dt in map(parse_one, cand) if dt]
@@ -421,21 +447,34 @@ class HRLooCrawler:
         return None
 
     def _extract_h2_titles(self, root: Tag):
+        """
+        ✅ 只提取 numbered 要点，并过滤“AI最前沿”等栏目标题
+        """
         out = []
         for h2 in root.select("h2.style-h2, h2[class*='style-h2']"):
             text = norm(h2.get_text())
             if not text:
                 continue
+
+            # 去编号/去括号
             text = strip_leading_num(text)
             text = re.split(r"[（(]", text)[0].strip()
-            if text and len(text) >= 4:
+            if not text:
+                continue
+
+            # ❌ 过滤栏目标题
+            if text in SECTION_BLACKLIST:
+                continue
+
+            # ✅ 只保留更像“要点”的内容：至少4字
+            if len(text) >= 4:
                 out.append(text)
+
         seen, final = set(), []
         for t in out:
-            if t in seen:
-                continue
-            seen.add(t)
-            final.append(t)
+            if t not in seen:
+                seen.add(t)
+                final.append(t)
         return final
 
     def _extract_strong_titles(self, root: Tag):
@@ -446,31 +485,29 @@ class HRLooCrawler:
                 continue
             text = strip_leading_num(text)
             text = re.split(r"[（(]", text)[0].strip()
-            if text:
+            if text and text not in SECTION_BLACKLIST:
                 keep.append(text)
         seen, out = set(), []
         for t in keep:
-            if t in seen:
-                continue
-            seen.add(t)
-            out.append(t)
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
         return out
 
     def _extract_numbered_titles(self, root: Tag):
         out = []
-        for p in root.find_all(["p","h2","h3","div","span","li"]):
+        for p in root.find_all(["p", "h2", "h3", "div", "span", "li"]):
             text = norm(p.get_text())
             if looks_like_numbered(text):
                 text = strip_leading_num(text)
                 text = re.split(r"[（(]", text)[0].strip()
-                if text and len(text) >= 4:
+                if text and len(text) >= 4 and text not in SECTION_BLACKLIST:
                     out.append(text)
         seen, final = set(), []
         for t in out:
-            if t in seen:
-                continue
-            seen.add(t)
-            final.append(t)
+            if t not in seen:
+                seen.add(t)
+                final.append(t)
         return final
 
     def _pick_container(self, soup: BeautifulSoup):
@@ -500,19 +537,24 @@ class HRLooCrawler:
             h1 = soup.find("h1")
             page_title = norm(h1.get_text()) if h1 else ""
             if not page_title:
-                title_tag = soup.find(["h1","h2"])
+                title_tag = soup.find(["h1", "h2"])
                 page_title = norm(title_tag.get_text()) if title_tag else ""
 
             pub_dt = self._extract_pub_time(soup)
             container = self._pick_container(soup)
 
-            for sel in [".other-wrap",".txt",".footer",".bottom"]:
+            for sel in [".other-wrap", ".txt", ".footer", ".bottom"]:
                 for bad in container.select(sel):
                     bad.decompose()
 
+            # ✅ 优先 h2（并过滤栏目）
             titles = self._extract_h2_titles(container)
+
+            # 退回：strong
             if not titles:
                 titles = self._extract_strong_titles(container)
+
+            # 再退回：编号段落
             if not titles:
                 titles = self._extract_numbered_titles(container)
 
@@ -531,8 +573,7 @@ def crawl_hrloo():
 def md_hr_info(item, titles):
     lines = []
     lines.append("## 👥 人力资讯")
-    # 标题行显示“当天”
-    lines.append(f"（抓取日期：{(parse_ymd(os.getenv('HR_TARGET_DATE')) or now_cn().date())}）")
+
     if not item or not titles:
         lines.append("（未发现当天的“三茅日报”）")
         return "\n".join(lines)
@@ -540,10 +581,12 @@ def md_hr_info(item, titles):
     for idx, t in enumerate(titles, 1):
         lines.append(f"{idx}. {truncate_text(t, 55)}")
 
+    # ✅ “查看详细”单独一行，钉钉稳定可点
     lines.append(f"\n👉 [查看详细]({item['url']})")
     return "\n".join(lines)
 
-# ===================== 汇总 Markdown =====================
+
+# ===================== 汇总 Markdown（你要的标题风格） =====================
 def build_markdown(hr_block: str, enterprise_block: str):
     today_mmdd = now_cn().strftime("%m-%d")
     md = [f"## 📌 {today_mmdd} 每日早报", ""]
@@ -552,6 +595,7 @@ def build_markdown(hr_block: str, enterprise_block: str):
     md.append(enterprise_block or "## 🏢 企业新闻\n（本次未生成）")
     return "\n".join(md).strip() + "\n"
 
+
 def main():
     run_hrloo = (os.getenv("RUN_HRLOO", "1").strip() != "0")
     run_sina = (os.getenv("RUN_SINA", "1").strip() != "0")
@@ -559,13 +603,15 @@ def main():
     hr_block = ""
     enterprise_block = ""
 
+    # 👥 三茅日报：抓当天
     if run_hrloo:
         hr_item, hr_titles = crawl_hrloo()
         hr_block = md_hr_info(hr_item, hr_titles)
 
+    # 🏢 新浪财经：周一抓上周五，其他工作日抓昨天
     if run_sina:
-        target, sina_items = crawl_sina_target_day()
-        enterprise_block = md_enterprise_news(target, sina_items)
+        target_day, sina_items = crawl_sina_target_day()
+        enterprise_block = md_enterprise_news(target_day, sina_items)
 
     md = build_markdown(hr_block, enterprise_block)
 
@@ -577,6 +623,7 @@ def main():
     resp = dingtalk_send_markdown(title, md)
     print("✅ DingTalk OK:", resp)
     print("✅ wrote:", out_file)
+
 
 if __name__ == "__main__":
     main()
