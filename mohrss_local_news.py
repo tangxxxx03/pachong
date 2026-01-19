@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 人社部 - 新闻中心 - 地方动态
-按工作日规则抓取 + 钉钉实验群推送（完整代码）
+按工作日规则抓取 + 钉钉实验群推送（增强版完整代码）
 
 规则：
 - 周一：抓上周五
@@ -13,7 +13,7 @@
 - SHIYANQUNSECRET   钉钉机器人加签 secret
 
 可选：
-- HR_TZ   默认 Asia/Shanghai
+- HR_TZ    默认 Asia/Shanghai
 - LIST_URL 覆盖列表页地址
 """
 
@@ -38,10 +38,11 @@ except Exception:
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
 
-# ✅ 改动点：默认改成“新闻中心-地方动态”栏目目录（与你截图一致）
+# 你浏览器里看的“地方动态”目录
 DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/"
 
-RE_DATE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+RE_DATE_DASH = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+RE_DATE_CN = re.compile(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b")
 
 
 def _tz():
@@ -69,47 +70,87 @@ def compute_target_date(now: datetime) -> str | None:
     return None
 
 
+def normalize_date_text(text: str) -> str | None:
+    """
+    支持：
+    - 2026-01-16
+    - 2026年1月16日 / 2026年01月16日
+    """
+    if not text:
+        return None
+    s = norm(text)
+
+    m1 = RE_DATE_DASH.search(s)
+    if m1:
+        return m1.group(1)
+
+    m2 = RE_DATE_CN.search(s)
+    if m2:
+        y = m2.group(1)
+        mo = int(m2.group(2))
+        d = int(m2.group(3))
+        return f"{y}-{mo:02d}-{d:02d}"
+
+    return None
+
+
 def fetch_html(url: str) -> str:
     s = requests.Session()
-    s.headers.update({"User-Agent": UA})
-    r = s.get(url, timeout=25)
+    s.headers.update({
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Connection": "keep-alive",
+        "Referer": "https://www.mohrss.gov.cn/",
+    })
+    r = s.get(url, timeout=25, allow_redirects=True)
     r.raise_for_status()
     return r.text
 
 
-def parse_list(html: str, page_url: str) -> list[dict]:
+def extract_iframe_src(html: str, page_url: str) -> str | None:
+    """
+    如果列表在 iframe 内页，这里把 iframe 的 src 抠出来
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    iframe = soup.find("iframe", src=True)
+    if iframe and iframe.get("src"):
+        return urljoin(page_url, iframe["src"].strip())
+    return None
+
+
+def parse_list_from_html(html: str, page_url: str) -> list[dict]:
     """
     鲁棒解析：不依赖固定 class
-    思路：
-    - 在页面里找所有出现 YYYY-MM-DD 的节点
-    - 往上找父容器（最多 8 层），在容器内找 <a href> 当标题链接
+    - 找所有出现日期的节点
+    - 往上找父容器，容器内找 a[href] 标题链接
     """
     soup = BeautifulSoup(html, "html.parser")
     items = []
 
-    # 1) 找到所有“含日期文本”的节点
-    date_nodes = soup.find_all(string=lambda s: bool(s and RE_DATE.search(str(s))))
-    for node in date_nodes:
-        date_text = RE_DATE.search(str(node)).group(1)
+    # 找所有文本节点，试图提取日期
+    for node in soup.find_all(string=True):
+        dt = normalize_date_text(str(node))
+        if not dt:
+            continue
 
         container = node.parent
-        for _ in range(8):
+        for _ in range(10):
             if not container:
                 break
             a = container.find("a", href=True)
             if a and norm(a.get_text()):
                 href = a["href"].strip()
-                # 只要像文章页（t2024...html / .html），就收
                 if ".html" in href:
                     items.append({
-                        "date": date_text,
+                        "date": dt,
                         "title": norm(a.get_text()),
                         "url": urljoin(page_url, href)
                     })
                     break
             container = container.parent
 
-    # 2) 兜底：如果上面仍然抓不到，直接扫所有 a，在父容器文本里找日期
+    # 兜底：扫所有 a，在父容器里找日期
     if not items:
         for a in soup.find_all("a", href=True):
             title = norm(a.get_text())
@@ -120,20 +161,18 @@ def parse_list(html: str, page_url: str) -> list[dict]:
                 continue
 
             parent = a
-            found_date = None
-            for _ in range(8):
+            found = None
+            for _ in range(10):
                 if not parent:
                     break
-                txt = norm(parent.get_text(" "))
-                m = RE_DATE.search(txt)
-                if m:
-                    found_date = m.group(1)
+                found = normalize_date_text(parent.get_text(" "))
+                if found:
                     break
                 parent = parent.parent
 
-            if found_date:
+            if found:
                 items.append({
-                    "date": found_date,
+                    "date": found,
                     "title": title,
                     "url": urljoin(page_url, href)
                 })
@@ -150,6 +189,32 @@ def parse_list(html: str, page_url: str) -> list[dict]:
 
     uniq.sort(key=lambda x: (x["date"], x["title"]), reverse=True)
     return uniq
+
+
+def parse_list(url: str) -> tuple[list[dict], dict]:
+    """
+    先抓 url 本身解析；
+    如果解析不到条目：
+      - 尝试抓 iframe src 的页面再解析
+    """
+    debug = {"used_url": url, "iframe_url": None}
+
+    html = fetch_html(url)
+    items = parse_list_from_html(html, url)
+
+    if items:
+        return items, debug
+
+    iframe_url = extract_iframe_src(html, url)
+    if iframe_url:
+        debug["iframe_url"] = iframe_url
+        html2 = fetch_html(iframe_url)
+        items2 = parse_list_from_html(html2, iframe_url)
+        if items2:
+            debug["used_url"] = iframe_url
+            return items2, debug
+
+    return items, debug
 
 
 def signed_dingtalk_url(webhook: str, secret: str) -> str:
@@ -180,19 +245,33 @@ def send_to_shiyanqun(title: str, markdown: str):
     return data
 
 
-def build_markdown(list_url: str, target_date: str, items: list[dict], now: datetime):
-    title = f"📰 人社部·地方动态（{target_date}）"
+def build_markdown(list_url: str, target_date: str, items: list[dict], hit: list[dict], now: datetime, debug: dict):
+    title = f"人社部·地方动态（目标日：{target_date}）"
+
     head = [
-        f"### 📰 人社部·地方动态（目标日：**{target_date}**）",
+        f"### 人社部·地方动态（目标日：**{target_date}**）",
         f"- 抓取时间：{now.strftime('%Y-%m-%d %H:%M:%S')}（{zh_weekday(now)}）",
         f"- 列表页：{list_url}",
-        ""
+        f"- 实际解析来源：{debug.get('used_url')}",
     ]
-    if not items:
-        return title, "\n".join(head + ["本次未匹配到目标日期的内容。"])
+    if debug.get("iframe_url"):
+        head.append(f"- 发现 iframe：{debug.get('iframe_url')}")
+    head.append("")
 
-    body = [f"{i}. [{it['title']}]({it['url']})  `({it['date']})`" for i, it in enumerate(items, 1)]
-    return title, "\n".join(head + body + ["", f"—— 共 **{len(items)}** 条"])
+    if hit:
+        body = [f"{i}. [{it['title']}]({it['url']})  `({it['date']})`" for i, it in enumerate(hit, 1)]
+        tail = ["", f"—— 共 **{len(hit)}** 条"]
+        return title, "\n".join(head + body + tail)
+
+    # 命中 0：把解析到的前几条“日期+标题”附上，方便你立刻定位
+    preview = items[:8]
+    if preview:
+        pv_lines = [f"- `{it['date']}` {it['title']}" for it in preview]
+        extra = ["本次未匹配到目标日期的内容。", "", "解析到的前几条是："] + pv_lines
+    else:
+        extra = ["本次未匹配到目标日期的内容。", "", "> 并且解析结果为 0 条（很可能是页面壳/iframe/环境返回差异导致）。"]
+
+    return title, "\n".join(head + extra)
 
 
 def main():
@@ -205,18 +284,18 @@ def main():
         return
 
     print(f"[INFO] 目标日期：{target}")
-    html = fetch_html(list_url)
-    items = parse_list(html, list_url)
+
+    items, debug = parse_list(list_url)
     hit = [x for x in items if x["date"] == target]
 
     print(f"[INFO] 解析 {len(items)} 条，命中 {len(hit)} 条。")
 
     out_path = f"mohrss_local_news_{target}.json"
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"target_date": target, "list_url": list_url, "items": hit}, f, ensure_ascii=False, indent=2)
+        json.dump({"target_date": target, "list_url": list_url, "debug": debug, "items": hit}, f, ensure_ascii=False, indent=2)
     print(f"[INFO] 已写出：{out_path}")
 
-    title, md = build_markdown(list_url, target, hit, now)
+    title, md = build_markdown(list_url, target, items, hit, now, debug)
     resp = send_to_shiyanqun(title, md)
     print(f"[INFO] 钉钉返回：{resp}")
 
