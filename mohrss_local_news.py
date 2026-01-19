@@ -1,24 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-人社部 - 地方动态（Playwright 渲染 + 鲁棒解析 + 等待/重试/兜底）
+人社部 - 地方动态（Playwright 渲染 + 鲁棒解析）
+钉钉输出：类似“图2”那种编号列表 + 查看详细（markdown 卡片风格）
 
-推送格式（只发一条）：
-- 命中 > 0：地方政策+N、标题
-- 命中 = 0：不推送
+推送效果：
+人力资讯（或 地方政策）
+1. 标题
+2. 标题
+...
+👉 查看详细
 
 规则：
 - 周一：抓上周五
 - 周二~周五：抓前一天
 - 周六/周日：不抓
 
-钉钉（实验群）环境变量：
+钉钉环境变量：
 - SHIYANQUNWEBHOOK
 - SHIYANQUNSECRET
-
-可选环境变量：
-- HR_TZ      默认 Asia/Shanghai
-- LIST_BASE  覆盖栏目目录（默认 dfdt/）
-- LIST_URL   直接指定列表页（默认 dfdt/index.html）
 """
 
 import os
@@ -61,9 +60,9 @@ def norm(s: str) -> str:
 
 def compute_target_date(now: datetime) -> str | None:
     wd = now.weekday()
-    if wd == 0:  # 周一 -> 上周五
+    if wd == 0:
         return (now - timedelta(days=3)).strftime("%Y-%m-%d")
-    if 1 <= wd <= 4:  # 周二~周五 -> 昨天
+    if 1 <= wd <= 4:
         return (now - timedelta(days=1)).strftime("%Y-%m-%d")
     return None
 
@@ -87,30 +86,12 @@ def normalize_date_text(text: str) -> str | None:
     return None
 
 
-def candidate_pages(list_base: str) -> list[str]:
-    # 真实列表页可能落在 index.html 或 index_1..N
-    pages = [urljoin(list_base, "index.html")]
-    for i in range(1, 6):
-        pages.append(urljoin(list_base, f"index_{i}.html"))
-    return pages
-
-
 def fetch_rendered_html(url: str, retries: int = 2) -> str:
-    """
-    用 Playwright 渲染页面。
-    关键增强：
-    - 等页面里出现日期文本（20xx-xx-xx），再取 content
-    - 失败/空内容自动重试
-    """
     last_html = ""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         )
 
         for attempt in range(retries + 1):
@@ -123,30 +104,22 @@ def fetch_rendered_html(url: str, retries: int = 2) -> str:
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
             )
-
-            # 额外 headers（更像真实浏览器）
-            page.set_extra_http_headers({
-                "Accept-Language": "zh-CN,zh;q=0.9",
-            })
+            page.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-                # 等待页面中出现日期格式（最多等 12s）
-                # 这比 networkidle 更靠谱：只要列表渲染出来就行
                 try:
                     page.wait_for_function(
                         "document.body && /20\\d{2}-\\d{2}-\\d{2}/.test(document.body.innerText)",
                         timeout=12000
                     )
                 except Exception:
-                    # 没等到也别立刻放弃，给点缓冲
                     page.wait_for_timeout(1500)
 
                 html = page.content()
                 last_html = html
 
-                # 如果页面明显很短/像空壳，也重试
+                # 太短就当作空壳，重试
                 if len(html or "") < 5000:
                     page.close()
                     time.sleep(1.2)
@@ -194,8 +167,7 @@ def parse_list_robust(html: str, page_url: str) -> list[dict]:
             container = container.parent
 
     # 去重 + 排序
-    seen = set()
-    uniq = []
+    seen, uniq = set(), []
     for it in items:
         key = (it["date"], it["title"], it["url"])
         if key in seen:
@@ -216,7 +188,7 @@ def signed_dingtalk_url(webhook: str, secret: str) -> str:
     return f"{webhook}{joiner}timestamp={timestamp}&sign={sign}"
 
 
-def send_to_shiyanqun_text(text: str):
+def dingtalk_send_markdown(title: str, md: str):
     webhook = os.getenv("SHIYANQUNWEBHOOK", "").strip()
     secret = os.getenv("SHIYANQUNSECRET", "").strip()
 
@@ -225,12 +197,33 @@ def send_to_shiyanqun_text(text: str):
         return
 
     url = signed_dingtalk_url(webhook, secret)
-    payload = {"msgtype": "text", "text": {"content": text}}
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": md}}
+
     r = requests.post(url, json=payload, timeout=25)
     r.raise_for_status()
     resp = r.json()
     if resp.get("errcode") not in (0, None):
         raise RuntimeError(f"钉钉发送失败：{resp}")
+
+
+def build_card_style_markdown(card_title: str, hit: list[dict], detail_url: str) -> tuple[str, str]:
+    """
+    输出类似图2：
+    人力资讯
+    1. xxx
+    2. xxx
+    👉 查看详细
+    """
+    lines = [f"## {card_title}"]
+    for i, it in enumerate(hit, 1):
+        # 这里用纯文本标题；如果你想每条可点开，把下面一行换成 markdown 链接即可
+        # lines.append(f"{i}. [{it['title']}]({it['url']})")
+        lines.append(f"{i}. {it['title']}")
+    lines.append("")
+    lines.append(f"👉 [查看详细]({detail_url})")
+
+    # 钉钉 markdown 的 title 建议短一点
+    return card_title, "\n".join(lines)
 
 
 def main():
@@ -241,51 +234,26 @@ def main():
         return
 
     list_base = os.getenv("LIST_BASE", DEFAULT_LIST_BASE).strip()
-    list_url_env = os.getenv("LIST_URL", "").strip() or None
+    list_url = os.getenv("LIST_URL", DEFAULT_LIST_URL).strip()
+
+    html = fetch_rendered_html(list_url, retries=2)
+    items = parse_list_robust(html, list_url)
+    hit = [x for x in items if x["date"] == target]
 
     print(f"[INFO] 目标日期：{target}")
-    print(f"[INFO] LIST_BASE：{list_base}")
-    if list_url_env:
-        print(f"[INFO] LIST_URL（强制）：{list_url_env}")
+    print(f"[INFO] 解析总条数：{len(items)}，命中：{len(hit)}")
 
-    # 1) 如果强制指定 LIST_URL，就只抓它
-    tried = []
-    best_items = []
-    best_url = None
-
-    urls_to_try = [list_url_env] if list_url_env else candidate_pages(list_base)
-
-    for u in urls_to_try:
-        if not u:
-            continue
-        html = fetch_rendered_html(u, retries=2)
-        items = parse_list_robust(html, u)
-        tried.append((u, len(items)))
-        if len(items) > len(best_items):
-            best_items = items
-            best_url = u
-        # 一旦拿到明显正常的列表（>5），就不再继续试
-        if len(items) >= 6:
-            break
-
-    hit = [x for x in best_items if x["date"] == target]
-
-    print(f"[INFO] 实际使用：{best_url}")
-    print(f"[INFO] 尝试结果：{tried}")
-    print(f"[INFO] 解析总条数：{len(best_items)}，命中：{len(hit)}")
-
-    # 命中 0：不推送，但把前几条打印出来，方便你排查是不是日期/渲染问题
+    # 命中 0：不推送
     if not hit:
-        print("[INFO] 命中 0，不推送。解析预览（前 10 条）：")
-        for it in best_items[:10]:
-            print(f"  - {it['date']} | {it['title']}")
+        print("[INFO] 命中 0，不推送")
         return
 
-    # ✅ 只发一条：命中列表第一条（已排序）
-    top = hit[0]
-    text = f"地方政策+{len(hit)}、{top['title']}"
-    send_to_shiyanqun_text(text)
-    print(text)
+    # ✅ 你想要的“图2样式”
+    card_title = "人力资讯"  # 你要改成“地方政策”也行
+    # 如果你想标题里带数量，可改成：card_title = f"地方政策（{len(hit)}）"
+    title, md = build_card_style_markdown(card_title, hit, detail_url=list_url)
+    dingtalk_send_markdown(title, md)
+    print(md)
 
 
 if __name__ == "__main__":
