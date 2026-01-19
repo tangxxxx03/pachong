@@ -1,11 +1,9 @@
-name: 新浪财经-昨日标题索引（钉钉推送）
+name: 每日早报（HRLoo + 新浪财经 → 钉钉）
 
 on:
   workflow_dispatch: {}
   schedule:
-    # 工作日（周一~周五）北京时间 09:00
-    # UTC 01:00 = 北京时间 09:00
-    - cron: "0 1 * * 1-5"
+    - cron: "0 1 * * 1-5" # UTC 01:00 = 北京时间 09:00，周一到周五
 
 jobs:
   run:
@@ -14,13 +12,22 @@ jobs:
 
     env:
       TZ: Asia/Shanghai
-      MAX_PAGES: "5"
-      SLEEP_SEC: "0.8"
-      OUT_FILE: "sina_yesterday.md"
 
-      # 你的钉钉 secrets
-      DINGTALK_TOKEN:  ${{ secrets.SHIYANQUNNWEBHOOK}}
+      # 你这个脚本用到的输出文件名
+      OUT_FILE: daily_report.md
+
+      # ✅ 把你的 secrets 注入成脚本需要的环境变量名
+      DINGTALK_TOKEN: ${{ secrets.SHIYANQUNWEBHOOK }}
       DINGTALK_SECRET: ${{ secrets.SHIYANQUNSECRET }}
+
+      # 可选：开关
+      RUN_HRLOO: "1"
+      RUN_SINA: "1"
+
+      # 新浪参数（可选）
+      SINA_MAX_PAGES: "5"
+      SINA_SLEEP_SEC: "0.8"
+      SINA_MAX_ITEMS: "15"
 
     steps:
       - name: Checkout repository
@@ -34,14 +41,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 urllib3
 
-      - name: Run 新浪财经 crawler (send DingTalk)
+      - name: Run crawler (send DingTalk)
         run: |
           python 新浪财经.py
 
       - name: Upload markdown result
         uses: actions/upload-artifact@v4
         with:
-          name: sina_yesterday
-          path: sina_yesterday.md
+          name: daily_report
+          path: daily_report.md
