@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 合并版：企业新闻 + 地方政策（钉钉 Markdown 友好）
+✅ 每条新闻标题本身就是超链接： 1. [标题](url)
+✅ 不再输出“查看详细 / 打开详情”
 
 企业新闻：
 - 先：三茅日报（HRLoo）要点（抓当天）
 - 再：新浪财经 上市公司研究院（周一抓上周五；其他工作日抓昨天）
-- 统一连续编号（从 1 开始一路排下去）
-- 财经每条“两行写法”保证链接可点击
-- 三茅用“查看详细”作为入口
+- 统一连续编号
 
 地方政策：
 - 人社部-地方动态（Playwright 渲染 + 鲁棒解析）
 - 周一抓上周五；周二~周五抓前一天；周末不抓
-- 以编号列表展示 + 查看详细（列表页）
 
 钉钉环境变量（Secrets）：
 - SHIYANQUNWEBHOOK
@@ -25,12 +24,11 @@
 - RUN_MOHRSS=1/0
 - OUT_FILE=daily_all.md
 
-- SRC_HRLOO_URLS=...（默认 hrloo 首页 + 频道）
+- SRC_HRLOO_URLS=...
 - SINA_MAX_PAGES=5
 - SINA_SLEEP_SEC=0.8
 - SINA_MAX_ITEMS=15
-
-- MOHRSS_LIST_URL=...（默认 dfdt/index.html）
+- MOHRSS_LIST_URL=...
 """
 
 import os
@@ -40,7 +38,6 @@ import ssl
 import hmac
 import base64
 import hashlib
-import urllib.parse
 from datetime import datetime, timedelta, date
 from urllib.parse import urljoin, quote_plus
 
@@ -82,13 +79,17 @@ def parse_ymd(s: str):
         return None
 
 def target_prev_workday(today: date) -> date:
-    """
-    周一：抓上周五
-    周二~周五：抓昨天
-    """
+    """周一：抓上周五；周二~周五：抓昨天"""
     if today.weekday() == 0:
         return today - timedelta(days=3)
     return today - timedelta(days=1)
+
+def md_link_title(title: str, url: str, max_len: int = 70) -> str:
+    """钉钉里标题做成链接（蓝字可点）"""
+    t = truncate_text(title, max_len)
+    # Markdown 链接里括号容易出事，做一下简单替换
+    t = t.replace("[", "【").replace("]", "】")
+    return f"[{t}]({url})"
 
 
 # ===================== 钉钉（加签） =====================
@@ -266,6 +267,8 @@ def make_session():
     return s
 
 CN_TITLE_DATE = re.compile(r"[（(]\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*[)）]")
+SECTION_BLACKLIST = {"AI最前沿", "热点速递", "行业观察", "最新动态"}
+CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 
 def date_from_bracket_title(text: str):
     m = CN_TITLE_DATE.search(text or "")
@@ -276,9 +279,6 @@ def date_from_bracket_title(text: str):
         return date(y, mo, d)
     except Exception:
         return None
-
-SECTION_BLACKLIST = {"AI最前沿", "热点速递", "行业观察", "最新动态"}
-CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 
 def strip_leading_num(t: str) -> str:
     t = re.sub(r"^\s*[（(]?\s*\d{1,2}\s*[)）]?\s*[、.．]\s*", "", t)
@@ -295,7 +295,6 @@ class HRLooCrawler:
         self.results = []
         override = parse_ymd(os.getenv("HR_TARGET_DATE"))
         self.target_date = override or now_cn().date()
-
         self.daily_title_pat = re.compile(r"三茅日[报報]")
         self.sources = [u.strip() for u in os.getenv(
             "SRC_HRLOO_URLS",
@@ -326,11 +325,9 @@ class HRLooCrawler:
                 title_text = norm(a.get_text())
                 if not self.daily_title_pat.search(title_text):
                     continue
-
                 t2 = date_from_bracket_title(title_text)
                 if t2 and t2 != self.target_date:
                     continue
-
                 abs_url = urljoin(base, a["href"])
                 if self._try_detail(abs_url):
                     return True
@@ -358,22 +355,15 @@ class HRLooCrawler:
         return False
 
     def _try_detail(self, abs_url):
-        pub_dt, titles, page_title = self._fetch_detail_clean(abs_url)
+        _, titles, page_title = self._fetch_detail_clean(abs_url)
         if not page_title or not self.daily_title_pat.search(page_title):
             return False
-
         t3 = date_from_bracket_title(page_title)
         if t3 and t3 != self.target_date:
             return False
         if not titles:
             return False
-
-        self.results.append({
-            "title": page_title,
-            "url": abs_url,
-            "date": (pub_dt.strftime("%Y-%m-%d %H:%M") if pub_dt else f"{self.target_date} 09:00"),
-            "titles": titles
-        })
+        self.results.append({"title": page_title, "url": abs_url, "titles": titles})
         return True
 
     def _extract_h2_titles(self, root: Tag):
@@ -445,7 +435,6 @@ class HRLooCrawler:
                 page_title = norm(title_tag.get_text()) if title_tag else ""
 
             container = self._pick_container(soup)
-
             for sel in [".other-wrap", ".txt", ".footer", ".bottom"]:
                 for bad in container.select(sel):
                     bad.decompose()
@@ -578,62 +567,51 @@ def crawl_mohrss_target_day():
     html = fetch_rendered_html(list_url, retries=2)
     items = mohrss_parse_list_robust(html, list_url)
     hit = [x for x in items if x["date"] == target.strftime("%Y-%m-%d")]
+    return target, hit
 
-    return target, list_url, hit
 
-
-# ===================== 组装 Markdown（按你要求的结构） =====================
-def build_md_enterprise_news():
-    """
-    企业新闻：
-    - 先三茅再新浪
-    - 统一连续编号
-    """
+# ===================== 组装 Markdown（按你要求：标题就是链接） =====================
+def build_md_enterprise_news(run_hrloo=True, run_sina=True) -> str:
     lines = ["## 🏢 企业新闻"]
     idx = 1
 
-    # 三茅（当天）
-    hr_item, hr_titles = crawl_hrloo()
-    if hr_item and hr_titles:
-        for t in hr_titles:
-            lines.append(f"{idx}. {truncate_text(t, 55)}")
-            idx += 1
-        lines.append(f"\n👉 [查看详细]({hr_item['url']})\n")
-    else:
-        lines.append("（未发现当天的三茅日报）\n")
+    # 1) 三茅要点（每条链接都跳到该日报详情页）
+    if run_hrloo:
+        hr_item, hr_titles = crawl_hrloo()
+        if hr_item and hr_titles:
+            for t in hr_titles:
+                lines.append(f"{idx}. {md_link_title(t, hr_item['url'], max_len=70)}")
+                idx += 1
+        else:
+            lines.append("（未发现当天的三茅日报）")
 
-    # 新浪（按规则）
-    target_day, sina_items = crawl_sina_target_day()
-    if sina_items:
-        for dt, title, link in sina_items:
-            lines.append(f"{idx}. {truncate_text(title, 55)}")
-            lines.append(f"   👉 [打开详情]({link})")
-            idx += 1
-    else:
-        lines.append("（新浪财经无更新或页面结构变化）")
+    # 2) 新浪财经（每条链接跳各自详情页）
+    if run_sina:
+        _, sina_items = crawl_sina_target_day()
+        if sina_items:
+            for _, title, link in sina_items:
+                lines.append(f"{idx}. {md_link_title(title, link, max_len=70)}")
+                idx += 1
+        else:
+            lines.append("（新浪财经无更新或页面结构变化）")
 
     return "\n".join(lines).strip()
 
-
-def build_md_mohrss_policy():
-    """
-    地方政策（人社部地方动态）
-    """
+def build_md_policy(run_mohrss=True) -> str:
     lines = ["## 🧩 地方政策"]
-    target, list_url, hit = crawl_mohrss_target_day()
+    if not run_mohrss:
+        lines.append("（本次未启用）")
+        return "\n".join(lines).strip()
 
+    _, hit = crawl_mohrss_target_day()
     if not hit:
         lines.append("（无更新或本次未命中）")
         return "\n".join(lines).strip()
 
     for i, it in enumerate(hit, 1):
-        # 每条也可以可点击（两行写法更稳）
-        lines.append(f"{i}. {truncate_text(it['title'], 55)}")
-        lines.append(f"   👉 [打开详情]({it['url']})")
+        lines.append(f"{i}. {md_link_title(it['title'], it['url'], max_len=70)}")
 
-    lines.append(f"\n👉 [查看详细]({list_url})")
     return "\n".join(lines).strip()
-
 
 def build_markdown(enterprise_block: str, policy_block: str) -> str:
     mmdd = now_cn().strftime("%m-%d")
@@ -645,48 +623,12 @@ def build_markdown(enterprise_block: str, policy_block: str) -> str:
 
 
 def main():
-    # 控制开关
     run_hrloo = (os.getenv("RUN_HRLOO", "1").strip() != "0")
     run_sina = (os.getenv("RUN_SINA", "1").strip() != "0")
     run_mohrss = (os.getenv("RUN_MOHRSS", "1").strip() != "0")
 
-    # 企业新闻：如果你关掉 hrloo 或 sina，就在内部自动少一块
-    enterprise_block = ""
-    if run_hrloo or run_sina:
-        # build_md_enterprise_news 内部已经写死“先三茅后新浪”
-        # 如果你想更严格：关闭某一块就不抓它，可以在这里拆开写；目前保持简单可用
-        if run_hrloo and not run_sina:
-            # 只要三茅
-            lines = ["## 🏢 企业新闻"]
-            hr_item, hr_titles = crawl_hrloo()
-            if hr_item and hr_titles:
-                for i, t in enumerate(hr_titles, 1):
-                    lines.append(f"{i}. {truncate_text(t, 55)}")
-                lines.append(f"\n👉 [查看详细]({hr_item['url']})")
-            else:
-                lines.append("（未发现当天的三茅日报）")
-            enterprise_block = "\n".join(lines).strip()
-
-        elif (not run_hrloo) and run_sina:
-            # 只要新浪
-            lines = ["## 🏢 企业新闻"]
-            target_day, sina_items = crawl_sina_target_day()
-            if sina_items:
-                for i, (dt, title, link) in enumerate(sina_items, 1):
-                    lines.append(f"{i}. {truncate_text(title, 55)}")
-                    lines.append(f"   👉 [打开详情]({link})")
-            else:
-                lines.append("（新浪财经无更新或页面结构变化）")
-            enterprise_block = "\n".join(lines).strip()
-
-        else:
-            # 两个都要：统一编号（你要求的）
-            enterprise_block = build_md_enterprise_news()
-
-    # 地方政策
-    policy_block = ""
-    if run_mohrss:
-        policy_block = build_md_mohrss_policy()
+    enterprise_block = build_md_enterprise_news(run_hrloo=run_hrloo, run_sina=run_sina)
+    policy_block = build_md_policy(run_mohrss=run_mohrss)
 
     md = build_markdown(enterprise_block, policy_block)
 
