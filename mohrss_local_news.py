@@ -12,8 +12,12 @@
 5) 地方政策单独一块，单独编号从 1 开始
 
 钉钉环境变量（Secrets）：
-- SHIYANQUNWEBHOOK
-- SHIYANQUNSECRET
+- 群1（实验群）：
+  - SHIYANQUNWEBHOOK
+  - SHIYANQUNSECRET
+- 群2（商业群）：
+  - DINGDINGSHANGYEWEBHOOK
+  - DINGDINGSHANGYESECRET
 
 可选环境变量：
 - HR_TZ=Asia/Shanghai
@@ -42,7 +46,7 @@ import base64
 import hashlib
 import urllib.parse
 from datetime import datetime, timedelta, date
-from urllib.parse import urljoin, quote_plus
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -116,12 +120,12 @@ def extract_access_token(token_or_webhook: str) -> str:
 
 def dingtalk_signed_url(webhook_or_token: str, secret: str) -> str:
     """
-    兼容：SHIYANQUNWEBHOOK 既可以传整条 webhook，也可以只传 access_token
+    兼容：WEBHOOK 既可以传整条 webhook，也可以只传 access_token
     """
     raw = (webhook_or_token or "").strip()
     token = extract_access_token(raw)
     if not token:
-        raise RuntimeError("SHIYANQUNWEBHOOK 为空（可填整条 webhook 或 access_token）")
+        raise RuntimeError("Webhook/token 为空（可填整条 webhook 或 access_token）")
 
     ts = str(int(time.time() * 1000))
     to_sign = f"{ts}\n{secret}"
@@ -132,12 +136,7 @@ def dingtalk_signed_url(webhook_or_token: str, secret: str) -> str:
     )
     return f"https://oapi.dingtalk.com/robot/send?access_token={token}&timestamp={ts}&sign={sign}"
 
-def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
-    webhook = (os.getenv("SHIYANQUNWEBHOOK") or "").strip()
-    secret = (os.getenv("SHIYANQUNSECRET") or "").strip()
-    if not webhook or not secret:
-        raise RuntimeError("缺少 SHIYANQUNWEBHOOK 或 SHIYANQUNSECRET")
-
+def dingtalk_send_markdown_to(webhook: str, secret: str, title: str, markdown_text: str) -> dict:
     url = dingtalk_signed_url(webhook, secret)
     payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
     r = requests.post(url, json=payload, timeout=25)
@@ -146,6 +145,38 @@ def dingtalk_send_markdown(title: str, markdown_text: str) -> dict:
     if str(data.get("errcode")) != "0":
         raise RuntimeError(f"钉钉发送失败：{data}")
     return data
+
+def get_dingtalk_targets():
+    """
+    支持多群推送：只要环境变量成对存在，就会推送。
+    - 群1：SHIYANQUNWEBHOOK + SHIYANQUNSECRET
+    - 群2：DINGDINGSHANGYEWEBHOOK + DINGDINGSHANGYESECRET
+    """
+    pairs = [
+        ("SHIYANQUNWEBHOOK", "SHIYANQUNSECRET", "实验群"),
+        ("DINGDINGSHANGYEWEBHOOK", "DINGDINGSHANGYESECRET", "商业群"),
+    ]
+    targets = []
+    for w_key, s_key, label in pairs:
+        w = (os.getenv(w_key) or "").strip()
+        s = (os.getenv(s_key) or "").strip()
+        if w and s:
+            targets.append((w, s, label))
+    return targets
+
+def dingtalk_send_markdown(title: str, markdown_text: str) -> list[dict]:
+    """
+    同时推送到多个群（检测到的 targets）
+    """
+    targets = get_dingtalk_targets()
+    if not targets:
+        raise RuntimeError("缺少钉钉变量：至少需要一组 webhook+secret（实验群或商业群）")
+
+    results = []
+    for webhook, secret, label in targets:
+        resp = dingtalk_send_markdown_to(webhook, secret, title, markdown_text)
+        results.append({"group": label, "resp": resp})
+    return results
 
 
 # ===================== 企业新闻：新浪财经 =====================
@@ -500,7 +531,7 @@ MOHRSS_DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/
 RE_DATE_DASH = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 RE_DATE_CN = re.compile(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b")
 
-def normalize_date_text(text: str) -> str | None:
+def normalize_date_text(text: str):
     if not text:
         return None
     s = norm(text)
@@ -696,8 +727,10 @@ def main():
         f.write(md)
 
     title = f"{now_cn().strftime('%m-%d')} 每日简报"
-    resp = dingtalk_send_markdown(title, md)
-    print("✅ DingTalk OK:", resp)
+    results = dingtalk_send_markdown(title, md)
+
+    for it in results:
+        print(f"✅ DingTalk OK ({it['group']}):", it["resp"])
     print("✅ wrote:", out_file)
 
 
