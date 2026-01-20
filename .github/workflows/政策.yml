@@ -28,8 +28,15 @@ jobs:
       - name: Run crawler
         env:
           HR_TZ: Asia/Shanghai
+
+          # —— 群 1：实验群 / 小群 ——
           SHIYANQUNWEBHOOK: ${{ secrets.DINGDINGXIAOQUNWEBHOOK }}
           SHIYANQUNSECRET: ${{ secrets.DINGDINGXIAOQUNSECRET }}
+
+          # —— 群 2：商业群 ——
+          DINGDINGSHANGYEWEBHOOK: ${{ secrets.DINGDINGSHANGYEWEBHOOK }}
+          DINGDINGSHANGYESECRET: ${{ secrets.DINGDINGSHANGYESECRET }}
+
           # LIST_URL: "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/index.html"
         run: |
           python mohrss_local_news.py
