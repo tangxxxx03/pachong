@@ -17,8 +17,8 @@ jobs:
       OUT_FILE: daily_report.md
 
       # ✅ 把你的 secrets 注入成脚本需要的环境变量名
-      DINGTALK_TOKEN: ${{ secrets.DINGDINGXIAOQUNWEBHOOK }}
-      DINGTALK_SECRET: ${{ secrets.DINGDINGXIAOQUNSECRET }}
+      DINGTALK_TOKEN: ${{ }}
+      DINGTALK_SECRET: ${{ s }}
 
       # 可选：开关
       RUN_HRLOO: "1"
