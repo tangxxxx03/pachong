@@ -618,7 +618,7 @@ def crawl_mohrss_target_day():
 
 # ===================== Markdown 组装（最终样式） =====================
 def build_enterprise_block(run_hrloo: bool, run_sina: bool) -> str:
-    lines = ["## 🏢 企业新闻"]
+    lines = ["## 🏢 财经新闻"]
     idx = 1
 
     # 先三茅要点
@@ -645,7 +645,7 @@ def build_enterprise_block(run_hrloo: bool, run_sina: bool) -> str:
     return "\n".join(lines).strip()
 
 def build_policy_block(run_mohrss: bool) -> str:
-    lines = ["## 🧩 地方政策"]
+    lines = ["## 🧩 地方动态"]
     if not run_mohrss:
         lines.append("（本次未启用）")
         return "\n".join(lines).strip()
@@ -669,9 +669,9 @@ def build_policy_block(run_mohrss: bool) -> str:
 def build_markdown(enterprise_block: str, policy_block: str) -> str:
     mmdd = now_cn().strftime("%m-%d")
     md = [f"## 📌 {mmdd} 每日简报", ""]
-    md.append(enterprise_block or "## 🏢 企业新闻\n（本次未生成）")
+    md.append(enterprise_block or "## 🏢 财经新闻\n（本次未生成）")
     md.append("\n---\n")
-    md.append(policy_block or "## 🧩 地方政策\n（本次未生成）")
+    md.append(policy_block or "## 🧩 地方动态\n（本次未生成）")
     return "\n".join(md).strip() + "\n"
 
 
