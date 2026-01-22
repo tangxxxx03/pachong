@@ -2,7 +2,7 @@
 """
 每日简报（钉钉友好最终版）
 - 🏢 企业新闻：三茅日报要点（当天） + 新浪财经（周一抓上周五，其他工作日抓昨天）合并输出，统一连续编号
-- 🧩 地方政策：人社部-地方动态（周一抓上周五，周二~周五抓昨天；周末不抓）
+- 🧩 地方政策：人社部-人社动态（周一抓上周五，周二~周五抓昨天；周末不抓）
 
 展示要求（按你最新要求）：
 1) 不要底部“查看详细”
@@ -34,7 +34,7 @@
 - SINA_SLEEP_SEC=0.8
 - SINA_MAX_ITEMS=15
 
-- MOHRSS_LIST_URL=...（默认人社部地方动态列表页）
+- MOHRSS_LIST_URL=...（默认人社部人社动态列表页）
 """
 
 import os
@@ -526,7 +526,7 @@ def crawl_hrloo():
     return it, it.get("titles", [])
 
 
-# ===================== 地方政策：人社部-地方动态（Playwright） =====================
+# ===================== 地方政策：人社部-人社动态（Playwright） =====================
 MOHRSS_DEFAULT_LIST_URL = "https://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/dfdt/index.html"
 RE_DATE_DASH = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
 RE_DATE_CN = re.compile(r"\b(20\d{2})年(\d{1,2})月(\d{1,2})日\b")
@@ -676,7 +676,7 @@ def build_enterprise_block(run_hrloo: bool, run_sina: bool) -> str:
     return "\n".join(lines).strip()
 
 def build_policy_block(run_mohrss: bool) -> str:
-    lines = ["## 🧩 地方动态"]
+    lines = ["## 🧩 人社动态"]
     if not run_mohrss:
         lines.append("（本次未启用）")
         return "\n".join(lines).strip()
@@ -702,7 +702,7 @@ def build_markdown(enterprise_block: str, policy_block: str) -> str:
     md = [f"## 📌 {mmdd} 每日简报", ""]
     md.append(enterprise_block or "## 🏢 财经新闻\n（本次未生成）")
     md.append("\n---\n")
-    md.append(policy_block or "## 🧩 地方动态\n（本次未生成）")
+    md.append(policy_block or "## 🧩 人社动态\n（本次未生成）")
     return "\n".join(md).strip() + "\n"
 
 
