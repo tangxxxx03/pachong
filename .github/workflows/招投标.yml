@@ -1,0 +1,46 @@
+name: Send DingTalk Message After Bidding Processing
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'path/to/your/script/**' # Adjust to the path where your script is stored
+  workflow_dispatch: {}
+
+jobs:
+  send_bidding_message:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.8'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run the bidding processing script
+        run: |
+          python your_script.py # Replace with the actual script name
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          CRAWL_BEIJING: true
+          CRAWL_ZSXTZB: true
+
+      - name: Send DingTalk message
+        run: |
+          curl -X POST -H 'Content-Type: application/json' \
+            -d '{
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": "最新招标公告",
+                    "text": "### 招标公告 \n\n【金额】: 1000万元 \n【采购人】: 采购公司 \n【截止时间】: 2026-02-01 \n\n更多详情，请查看附件链接。"
+                }
+            }' \
+            ${{ secrets.DINGTALK_WEBHOOK }}
