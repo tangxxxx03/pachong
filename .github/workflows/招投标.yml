@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'path/to/your/script/**' # Adjust to the path where your script is stored
+      - 'python/scripts/main.py'  # 使用正斜杠作为路径分隔符
   workflow_dispatch: {}
 
 jobs:
@@ -26,12 +26,7 @@ jobs:
 
       - name: Run the bidding processing script
         run: |
-          python your_script.py # Replace with the actual script name
-        env:
-          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_SHIYANQUNWEBHOOK }}
-          DINGTALK_SECRET: ${{ secrets.DINGTALK_SHIYANQUNSECRET }}
-          CRAWL_BEIJING: true
-          CRAWL_ZSXTZB: true
+          python python/scripts/main.py  # 使用正确的路径
 
       - name: Send DingTalk message
         run: |
